@@ -16,6 +16,7 @@ use iroh::{
     Endpoint,
     endpoint::{Connection, VarInt},
 };
+use tokio::sync::mpsc::{self};
 
 const ALPN: &[u8] = b"iroh/godot/0";
 const MAX_ALLOWED_PACKET_SIZE: usize = 1024;
@@ -32,16 +33,15 @@ unsafe impl ExtensionLibrary for IrohGodot {}
 #[class(base = MultiplayerPeerExtension, tool, no_init)]
 struct IrohMultiplayerPeer {
     base: Base<MultiplayerPeerExtension>,
-    endpoint: Arc<Endpoint>,
-    connection_recv_channel: tokio::sync::mpsc::Receiver<IrohConnection>,
-    connections: HashMap<PeerId, IrohConnection>,
-    packets: VecDeque<(PeerId, Vec<u8>)>,
+    is_server: bool,
+    internal: IrohEndpointRuntime,
+    peers: HashMap<PeerId, IrohConnectionRuntime>,
+    packets: VecDeque<(PeerId, Packet)>,
     target_peer: PeerId,
 }
 
 #[godot_api]
 impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
-    // Required methods.
     fn get_available_packet_count(&self) -> i32 {
         self.packets.len() as i32
     }
@@ -78,58 +78,70 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
         }
     }
     fn is_server(&self) -> bool {
-        true
+        self.is_server
     }
     fn poll(&mut self) {
-        // Receive and store iroh connections.
-        while let Ok(conn) = self.connection_recv_channel.try_recv() {
-            let peer_id = fastrand::i32(1..i32::MAX);
-            self.connections.insert(peer_id, conn);
-            self.base_mut()
-                .signals()
-                .peer_connected()
-                .emit(peer_id as i64);
-        }
+        // Open bi-directional streams on new connections.
+        self.internal
+            .gather_connections()
+            .into_iter()
+            .for_each(|conn| {
+                let new_peer_id = fastrand::i32(1..i32::MAX);
 
-        // Receive packets from all connecitons.
-        self.connections.iter_mut().for_each(|(id, conn)| {
-            while let Some(packet) = conn.recv_packet() {
-                self.packets.push_back((*id, packet));
-            }
+                match self
+                    .peers
+                    .insert(new_peer_id, IrohConnectionRuntime::new(conn))
+                {
+                    _ => self
+                        .base_mut()
+                        .signals()
+                        .peer_connected()
+                        .emit(new_peer_id as i64),
+                }
+            });
+
+        // Store packets received from all peers.
+        self.peers.iter_mut().for_each(|(id, peer)| {
+            let Some(packet) = peer.recv_packet() else {
+                return;
+            };
+
+            self.packets.push_back((*id, packet));
         });
     }
     fn close(&mut self) {
-        AsyncRuntime::block_on(self.endpoint.clone().close())
+        AsyncRuntime::block_on(self.internal.endpoint().close())
     }
     fn disconnect_peer(&mut self, p_peer: i32, _p_force: bool) {
-        if let Some(conn) = self.connections.get(&p_peer) {
-            conn.get_connection()
-                .close(VarInt::from_u32(0), b"Disconnect Request");
+        match self.peers.get(&p_peer) {
+            Some(peer) => {
+                peer.get_connection()
+                    .close(VarInt::from_u32(0), b"Disconnection request");
+                self.base_mut()
+                    .signals()
+                    .peer_disconnected()
+                    .emit(p_peer as i64);
+            }
+            None => return,
         }
-        self.base_mut()
-            .signals()
-            .peer_disconnected()
-            .emit(p_peer as i64);
     }
     fn get_unique_id(&self) -> i32 {
         -1i32
     }
     fn get_connection_status(&self) -> ConnectionStatus {
-        if self.endpoint.is_closed() {
-            ConnectionStatus::DISCONNECTED
-        } else {
-            ConnectionStatus::CONNECTED
+        match self.internal.endpoint().is_closed() {
+            true => ConnectionStatus::DISCONNECTED,
+            false => ConnectionStatus::CONNECTED,
         }
     }
-
-    // Optional methods.
     fn put_packet_script(&mut self, p_buffer: PackedByteArray) -> Error {
-        self.connections.iter().for_each(|(_, peer)| {
-            peer.send_packet(p_buffer.to_vec());
+        self.peers.iter().for_each(|(_, peer)| {
+            if let Err(err) = peer.send_packet(p_buffer.to_vec()) {
+                godot_error!("{}", err)
+            }
         });
         Error::OK
     }
-
     fn get_packet_script(&mut self) -> PackedByteArray {
         if let Some(packet) = self.packets.pop_front() {
             packet.1.into()
@@ -142,111 +154,142 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
 #[godot_api]
 impl IrohMultiplayerPeer {
     #[func]
-    fn connect() -> Gd<Self> {
-        let _ = AsyncRuntime::runtime().enter();
+    fn initialize_server() -> Gd<Self> {
+        Gd::from_init_fn(|base| Self {
+            base,
+            is_server: true,
+            internal: IrohEndpointRuntime::new(),
+            peers: Default::default(),
+            packets: Default::default(),
+            target_peer: Default::default(),
+        })
+    }
 
-        let endpoint = Arc::new(
-            AsyncRuntime::block_on(
-                Endpoint::builder()
-                    .discovery_n0()
-                    .alpns(vec![ALPN.to_vec()])
-                    .bind(),
-            )
-            .expect("Iroh Endpoint"),
-        );
+    #[func]
+    fn initialize_client() -> Gd<Self> {
+        Gd::from_init_fn(|base| Self {
+            base,
+            is_server: false,
+            internal: IrohEndpointRuntime::new(),
+            peers: Default::default(),
+            packets: Default::default(),
+            target_peer: Default::default(),
+        })
+    }
+}
 
-        let (conn_send, conn_recv) = tokio::sync::mpsc::channel::<IrohConnection>(128);
+struct IrohEndpointRuntime {
+    internal: Arc<Endpoint>,
+    recv_conn: mpsc::Receiver<Connection>,
+}
 
-        let endpoint_clone = endpoint.clone();
+impl IrohEndpointRuntime {
+    fn new() -> Self {
+        env_logger::init();
+
+        let endpoint =
+            AsyncRuntime::block_on(Endpoint::builder().alpns(vec![ALPN.to_vec()]).bind())
+                .expect("iroh endpoint");
+        let internal = Arc::new(endpoint);
+
+        let internal_ref = internal.clone();
+        let (send_conn, recv_conn) = mpsc::channel::<Connection>(128);
         AsyncRuntime::spawn(async move {
-            let endpoint = endpoint_clone;
-            let conn_send = conn_send;
-
-            while let Some(incoming) = endpoint.accept().await {
+            // Loops until endpoint is closed.
+            while let Some(incoming) = internal_ref.accept().await {
                 let connecting = match incoming.accept() {
-                    Ok(connection) => connection,
+                    Ok(conn) => conn,
                     Err(err) => {
-                        eprintln!("Incoming connection failed: {}", err);
+                        log::warn!("{}", err);
                         continue;
                     }
                 };
 
                 let connection = match connecting.await {
-                    Ok(conn) => IrohConnection::new(conn).await,
+                    Ok(conn) => conn,
                     Err(err) => {
-                        eprintln!("Connection error: {}", err);
+                        log::error!("{}", err);
                         continue;
                     }
                 };
 
-                if let Err(err) = conn_send.send(connection).await {
-                    eprintln!("Connection sync channel send error: {}", err);
+                // Send connection back to main thread.
+                match send_conn.send(connection).await {
+                    Err(err) => {
+                        log::error!("{}", err);
+                        continue;
+                    }
+                    _ => continue,
                 }
             }
         });
 
-        Gd::from_init_fn(|base| Self {
-            base,
-            endpoint,
-            connection_recv_channel: conn_recv,
-            connections: HashMap::new(),
-            packets: VecDeque::new(),
-            target_peer: 0,
-        })
+        Self {
+            internal,
+            recv_conn,
+        }
+    }
+
+    fn gather_connections(&mut self) -> VecDeque<Connection> {
+        let mut connections: VecDeque<Connection> = VecDeque::new();
+        while let Ok(conn) = self.recv_conn.try_recv() {
+            connections.push_back(conn);
+        }
+        connections
+    }
+
+    fn endpoint(&self) -> Arc<Endpoint> {
+        self.internal.clone()
     }
 }
 
-struct IrohConnection {
-    connection: Connection,
+struct IrohConnectionRuntime {
+    connection: Arc<Connection>,
     packet_recv: tokio::sync::mpsc::Receiver<Packet>,
     packet_send: tokio::sync::mpsc::Sender<Packet>,
 }
 
-impl IrohConnection {
-    async fn new(connection: Connection) -> Self {
-        // Receive uni-directional packets loop.
-        let (in_packet_send, in_packet_recv) = tokio::sync::mpsc::channel::<Packet>(128);
-        let conn_clone = connection.clone();
-        AsyncRuntime::spawn(async move {
-            let mut s_recv = conn_clone
-                .accept_uni()
-                .await
-                .expect("Uni-directional stream");
+impl IrohConnectionRuntime {
+    fn new(connection: Connection) -> Self {
+        let connection = Arc::new(connection);
+        let (in_packet_send, in_packet_recv) = mpsc::channel::<Packet>(128);
+        let (out_packet_send, mut out_packet_recv) = mpsc::channel::<Packet>(128);
 
-            let in_channel = in_packet_send;
+        let conn_ref = connection.clone();
+        AsyncRuntime::spawn(async move {
+            let (mut send, mut recv) = match conn_ref.accept_bi().await {
+                Ok(stream) => stream,
+                Err(err) => return log::error!("{}", err),
+            };
 
             loop {
-                let buf: &mut [u8; MAX_ALLOWED_PACKET_SIZE] = &mut [0u8; MAX_ALLOWED_PACKET_SIZE];
-                match s_recv.read_exact(buf).await {
-                    Ok(_) => {
-                        if let Err(err) = in_channel.send(buf.to_vec()).await {
-                            eprintln!("Send Error: {}", err)
+                // handle incoming packets
+                let incoming_buf: &mut [u8; MAX_ALLOWED_PACKET_SIZE] =
+                    &mut [0u8; MAX_ALLOWED_PACKET_SIZE];
+
+                match recv.read_exact(incoming_buf).await {
+                    Err(err) => {
+                        log::error!("{}", err);
+                    }
+                    _ => {
+                        // Send received packet to main thread.
+                        if let Err(err) = in_packet_send.send(incoming_buf.to_vec()).await {
+                            log::error!("{}", err)
                         }
                     }
-                    Err(err) => {
-                        eprintln!("Read Exact Error: {}", err);
-                        continue;
-                    }
                 }
-            }
-        });
 
-        // Send uni-directional packets loop.
-        let (out_packet_send, out_packet_recv) = tokio::sync::mpsc::channel::<Packet>(128);
-        let conn_clone = connection.clone();
-        AsyncRuntime::spawn(async move {
-            let mut s_send = conn_clone.open_uni().await.expect("Uni-directional stream");
-
-            let mut out_channel = out_packet_recv;
-
-            loop {
-                if let Some(packet) = out_channel.recv().await {
-                    if let Err(err) = s_send.write_all(packet.as_slice()).await {
-                        eprintln!("{}", err);
+                // handle outgoing packets
+                match out_packet_recv.recv().await {
+                    Some(packet) => {
+                        if let Err(err) = send.write_all(packet.as_slice()).await {
+                            log::error!("{}", err)
+                        }
                     }
-                } else {
-                    continue;
+                    None => continue,
                 }
+
+                continue;
             }
         });
 
@@ -257,8 +300,8 @@ impl IrohConnection {
         }
     }
 
-    fn get_connection(&self) -> &Connection {
-        &self.connection
+    fn get_connection(&self) -> Arc<Connection> {
+        self.connection.clone()
     }
 
     fn recv_packet(&mut self) -> Option<Packet> {
@@ -271,9 +314,7 @@ impl IrohConnection {
         }
     }
 
-    fn send_packet(&self, packet: Packet) {
-        if let Err(err) = self.packet_send.try_send(packet) {
-            eprintln!("{}", err);
-        }
+    fn send_packet(&self, packet: Packet) -> Result<(), mpsc::error::TrySendError<Packet>> {
+        self.packet_send.try_send(packet)
     }
 }

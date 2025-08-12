@@ -3,3 +3,5 @@ Cargo.lock
 
 /addons/iroh_godot/*
 !/addons/iroh_godot/iroh_godot.gdextension
+
+/examples/*/addons

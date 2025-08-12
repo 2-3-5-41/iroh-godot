@@ -1,0 +1,25 @@
+[gd_scene load_steps=2 format=3 uid="uid://dmlv5an0f3wq1"]
+
+[ext_resource type="Script" uid="uid://kb0ak4xng3qq" path="res://scripts/root.gd" id="1_j5px3"]
+
+[node name="Root" type="Node3D"]
+script = ExtResource("1_j5px3")
+
+[node name="PanelContainer" type="PanelContainer" parent="."]
+anchors_preset = 9
+anchor_bottom = 1.0
+grow_vertical = 2
+
+[node name="VBoxContainer" type="VBoxContainer" parent="PanelContainer"]
+layout_mode = 2
+
+[node name="Server" type="Button" parent="PanelContainer/VBoxContainer"]
+layout_mode = 2
+text = "Create server"
+
+[node name="Client" type="Button" parent="PanelContainer/VBoxContainer"]
+layout_mode = 2
+text = "Create client"
+
+[connection signal="pressed" from="PanelContainer/VBoxContainer/Server" to="." method="_on_server_button_pressed"]
+[connection signal="pressed" from="PanelContainer/VBoxContainer/Client" to="." method="_on_client_button_pressed"]
