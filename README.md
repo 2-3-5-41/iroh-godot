@@ -14,3 +14,8 @@ Building from source is simple, if we assume you already know how to use git, an
   - The build script will build both debug, and release binaries
   - The build script will then create symlinks of the built `debug` and `release` directories to the repo's `addons/iroh-godot` directory.
 - Create a symlink, or copy the `addons/iroh-godot` directory into your Godot project.
+
+## Mentions
+
+- [godot-iroh](https://github.com/tipragot/godot-iroh)
+  - For proving the implementation of `iroh` into godot as a `MultiplayerPeerExtension`.
