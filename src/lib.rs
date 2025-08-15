@@ -1,7 +1,5 @@
-use crate::{
-    internal_protocol::MultiplayerSyncChannel,
-    shared::{PeerId, RecvPacket},
-};
+use std::{collections::VecDeque, mem::replace};
+
 use godot::{
     classes::{
         IMultiplayerPeerExtension, MultiplayerPeerExtension,
@@ -10,19 +8,10 @@ use godot::{
     global::Error,
     prelude::*,
 };
-use godot_tokio::AsyncRuntime;
-use iroh::{
-    Endpoint, NodeId,
-    endpoint::{Connection, VarInt},
-    protocol::Router,
-};
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-};
+use iroh::{Endpoint, NodeId, node_info::NodeIdExt, protocol::Router};
+use tokio::{sync::broadcast, task::JoinHandle};
 
-mod internal_protocol;
-mod shared;
+mod iroh_godot_protocol;
 
 const MAX_ALLOWED_PACKET_SIZE: usize = 1024;
 
@@ -35,204 +24,214 @@ unsafe impl ExtensionLibrary for IrohGodot {}
 #[class(base = MultiplayerPeerExtension, tool, no_init)]
 struct IrohMultiplayerPeer {
     base: Base<MultiplayerPeerExtension>,
-    id: PeerId,
-    inner: Internal,
-    peers: HashMap<PeerId, Connection>,
-    packets: VecDeque<RecvPacket>,
-    target_peer: PeerId,
+    inner: Inner,
+    transfer_channel: ProtocolChannel,
+    status: Connection,
+    packet_recv: Option<broadcast::Receiver<Vec<u8>>>,
+    packet_queue: VecDeque<Vec<u8>>,
 }
 
 #[godot_api]
 impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
     fn get_available_packet_count(&self) -> i32 {
-        self.packets.len() as i32
+        todo!()
     }
     fn get_max_packet_size(&self) -> i32 {
         MAX_ALLOWED_PACKET_SIZE as i32
     }
     fn get_packet_channel(&self) -> i32 {
-        // TODO: return the protocol 'channel' the most recent packet was received from.
-        0
+        todo!("Need to return the most recent packet's protocol channel.")
     }
     fn get_packet_mode(&self) -> TransferMode {
         TransferMode::RELIABLE
     }
-    fn set_transfer_channel(&mut self, _p_channel: i32) {
-        // TODO: Use this to dictate which protocol to send a packet through;
-        // i.e:
-        // 1 -> This lib's internal protocol
-        // 2 -> `iroh-gossip`
-        // 3 -> ect...
-        return;
+    fn set_transfer_channel(&mut self, p_channel: i32) {
+        self.transfer_channel = ProtocolChannel::from(p_channel)
     }
     fn get_transfer_channel(&self) -> i32 {
-        // TODO: Return the 'channel' number for the desired iroh protocol.
-        0
+        self.transfer_channel.to_godot() as i32
     }
-    fn set_transfer_mode(&mut self, _p_mode: TransferMode) {
-        // Do nothing, iroh uses QUIC under the hood, and there are
-        // no plans for this library to support raw UDP packets.
-        return godot_warn!("This function does nothing; QUIC only handles 'RELIABLE' streams.");
+    fn set_transfer_mode(&mut self, p_mode: TransferMode) {
+        match p_mode {
+            TransferMode::RELIABLE => return,
+            _ => {
+                return godot_warn!(
+                    "This function does nothing; QUIC only handles 'RELIABLE' streams."
+                );
+            }
+        }
     }
     fn get_transfer_mode(&self) -> TransferMode {
-        godot_warn!("QUIC only speaks in 'RELIABLE' streams of data.");
         TransferMode::RELIABLE
     }
     fn set_target_peer(&mut self, p_peer: i32) {
-        self.target_peer = p_peer;
+        todo!()
     }
     fn get_packet_peer(&self) -> i32 {
-        if let Some((id, _)) = self.packets.front() {
-            return *id;
-        }
-
-        -1
+        todo!("Get the most recent i32 peer id from most recent packet received.")
     }
     fn is_server(&self) -> bool {
-        match self.id {
-            1 => true,
-            _ => false,
-        }
+        todo!()
     }
     fn poll(&mut self) {
-        self.handle_new_connections();
-        self.handle_incoming_packets();
-    }
-    fn close(&mut self) {
-        AsyncRuntime::block_on(self.inner.router().endpoint().close())
-    }
-    fn disconnect_peer(&mut self, p_peer: i32, _p_force: bool) {
-        match self.peers.get(&p_peer) {
-            Some(peer) => {
-                peer.close(VarInt::from_u32(0), b"Disconnection request");
-                self.base_mut()
-                    .signals()
-                    .peer_disconnected()
-                    .emit(p_peer as i64);
+        // Update status
+        self.status = match replace(&mut self.status, Connection::Initialized) {
+            Connection::Connecting(join_handle) => {
+                if join_handle.is_finished() {
+                    let result = match n0_future::future::block_on(join_handle) {
+                        Ok(result) => result,
+                        Err(err) => {
+                            return godot_error!("{err}");
+                        }
+                    };
+
+                    match result {
+                        Ok(conn) => {
+                            let rx = conn.subscribe();
+                            self.packet_recv = Some(rx);
+                            Connection::Connected(conn)
+                        }
+                        Err(err) => return godot_error!("{err}"),
+                    }
+                } else {
+                    Connection::Connecting(join_handle)
+                }
             }
-            None => return,
+            _ => Connection::Initialized,
+        };
+
+        if let Some(rx) = &mut self.packet_recv {
+            match rx.try_recv() {
+                Ok(packet) => self.packet_queue.push_back(packet),
+                Err(err) => godot_error!("{err}"),
+            }
         }
     }
+    fn close(&mut self) {
+        n0_future::future::block_on(self.inner.endpoint.close())
+    }
+    fn disconnect_peer(&mut self, p_peer: i32, _p_force: bool) {
+        todo!("Disconnect peer by it's i32 id")
+    }
     fn get_unique_id(&self) -> i32 {
-        self.id
+        match &self.status {
+            Connection::Connected(multiplayer_connection) => multiplayer_connection.get_id(),
+            _ => 1, // Assume we are the 'server' node until we've connected to another node.
+        }
     }
     fn get_connection_status(&self) -> ConnectionStatus {
-        match self.inner.router().endpoint().is_closed() {
-            true => ConnectionStatus::DISCONNECTED,
-            false => ConnectionStatus::CONNECTED,
+        match self.status {
+            Connection::Connecting(_) => ConnectionStatus::CONNECTING,
+            _ => ConnectionStatus::CONNECTED, // No matter what, we are connected to the iroh network.
         }
     }
     fn put_packet_script(&mut self, p_buffer: PackedByteArray) -> Error {
-        self.inner.channel.send_packet(p_buffer.to_vec());
-        Error::OK
+        todo!("Push packet to inner iroh protocols")
     }
     fn get_packet_script(&mut self) -> PackedByteArray {
-        if let Some((_, packet)) = self.packets.pop_front() {
-            packet.into()
-        } else {
-            PackedByteArray::new()
-        }
-    }
-    fn is_server_relay_supported(&self) -> bool {
-        true
+        todo!("Read the most recent packet")
     }
 }
 
 #[godot_api]
 impl IrohMultiplayerPeer {
+    #[signal]
+    fn connecting_to_peer(peer: GString);
+
     #[func]
     fn initialize() -> Gd<Self> {
-        let inner = Internal::bootstrap();
         Gd::from_init_fn(|base| Self {
             base,
-            id: 1,
-            inner,
-            peers: Default::default(),
-            packets: Default::default(),
-            target_peer: Default::default(),
+            inner: Inner::init(),
+            transfer_channel: ProtocolChannel::Default,
+            status: Connection::Initialized,
+            packet_recv: Default::default(),
+            packet_queue: Default::default(),
         })
     }
 
+    /// Make a connection to a peer based on the current protocol channel.
     #[func]
-    fn initialize_and_join() -> Gd<Self> {
-        let inner = Internal::bootstrap();
-        Gd::from_init_fn(|base| Self {
-            base,
-            id: 2,
-            inner,
-            peers: Default::default(),
-            packets: Default::default(),
-            target_peer: Default::default(),
-        })
+    fn connect(&mut self, node_id: String) {
+        match self.status {
+            Connection::Connecting(_) => return,
+            _ => (),
+        }
+
+        let raw_id = match NodeId::from_z32(&node_id) {
+            Ok(id) => id,
+            Err(err) => return godot_error!("{err}"),
+        };
+
+        self.status = Connection::Connecting(self.inner.multiplayer.join(raw_id));
+
+        self.signals()
+            .connecting_to_peer()
+            .emit(&node_id.to_godot());
     }
 
-    /// Get a Base32 envoded string of our node id.
+    /// Get a z-base32 encoded string of our local iroh node id (PublicKey).
     #[func]
     fn node_id(&self) -> String {
-        self.inner.who_am_i()
+        let raw_id = self.inner.local_id();
+        raw_id.to_z32()
     }
 }
 
-impl IrohMultiplayerPeer {
-    fn handle_new_connections(&mut self) {
-        let connections = self.inner.channel.accepted_connections();
-        if connections.len() == 0 {
-            return;
-        }
+struct Inner {
+    endpoint: Endpoint,
+    router: Router,
+    multiplayer: iroh_godot_protocol::Multiplayer,
+}
 
-        connections.for_each(|(conn, id)| {
-            self.peers.insert(id, conn);
-        });
+impl Inner {
+    fn init() -> Self {
+        n0_future::future::block_on(async {
+            let endpoint = Endpoint::builder()
+                .discovery_n0()
+                .bind()
+                .await
+                .expect("iroh runtime");
+
+            let multiplayer = iroh_godot_protocol::Multiplayer::init(endpoint.clone());
+
+            let router = Router::builder(endpoint.clone())
+                .accept(iroh_godot_protocol::ALPN, multiplayer.clone())
+                .spawn();
+
+            Self {
+                endpoint,
+                router,
+                multiplayer,
+            }
+        })
     }
-    fn handle_incoming_packets(&mut self) {
-        let packets = self.inner.channel.incoming_packets();
-        if packets.len() == 0 {
-            return;
-        }
 
-        packets.for_each(|packet| {
-            self.packets.push_back(packet);
-        });
+    fn local_id(&self) -> NodeId {
+        self.router.endpoint().node_id()
     }
 }
 
-struct Internal {
-    node_id: NodeId,
-    inner: Arc<Router>,
-    channel: MultiplayerSyncChannel,
+#[derive(GodotConvert, Var, Export, Clone)]
+#[godot(via = i64)]
+enum ProtocolChannel {
+    Default = 0,
 }
 
-impl Internal {
-    fn bootstrap() -> Self {
-        env_logger::init();
-
-        let endpoint = AsyncRuntime::block_on(Endpoint::builder().discovery_n0().bind())
-            .expect("iroh endpoint");
-
-        let node_id = endpoint.node_id();
-
-        let (multiplayer_proto, channel) = internal_protocol::GodotMultiplayer::new();
-
-        let router = Router::builder(endpoint)
-            .accept(internal_protocol::ALPN, multiplayer_proto)
-            .spawn();
-
-        let inner = Arc::new(router);
-
-        Self {
-            node_id,
-            inner,
-            channel,
+impl From<i32> for ProtocolChannel {
+    fn from(value: i32) -> Self {
+        match value {
+            _ => Self::Default, // Just default to gossip if provided an invalid i32
         }
     }
+}
 
-    fn who_am_i(&self) -> String {
-        data_encoding::BASE32_NOPAD
-            .encode(self.node_id.as_bytes())
-            .to_ascii_lowercase()
-    }
-
-    fn router(&self) -> Arc<Router> {
-        self.inner.clone()
-    }
+enum Connection {
+    Initialized,
+    Connecting(
+        JoinHandle<
+            Result<iroh_godot_protocol::MultiplayerConnection, iroh::endpoint::ConnectError>,
+        >,
+    ),
+    Connected(iroh_godot_protocol::MultiplayerConnection),
 }

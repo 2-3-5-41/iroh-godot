@@ -10,8 +10,7 @@ crate-type = ["cdylib"]
 data-encoding = "2.9.0"
 env_logger = "0.11.8"
 fastrand = "2.3.0"
-godot = "0.3.4"
-godot_tokio = "0.3.1"
+godot = { version = "0.3.4", features = ["register-docs"] }
 iroh = "0.91.1"
 log = "0.4.27"
 n0-future = "0.2.0"
