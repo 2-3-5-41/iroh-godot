@@ -1,3 +1,7 @@
+use crate::{
+    MAX_ALLOWED_PACKET_SIZE,
+    godot_peer_data_generated::{MultiplayerDataPacket, MultiplayerDataPacketArgs},
+};
 use godot_tokio::AsyncRuntime;
 use iroh::{
     Endpoint, NodeId,
@@ -39,20 +43,31 @@ impl Multiplayer {
     ) -> tokio::task::JoinHandle<Result<MultiplayerConnection, ConnectError>> {
         let endpoint = self.endpoint.clone();
         AsyncRuntime::spawn(async move {
+            log::info!("Getting remote endpoint connection.");
             let conn = endpoint.connect(node, ALPN).await?;
 
+            log::info!("Receiving remote randomly generated i32 id");
             // Receive random i32 peer id from 'server' node.
             let mut stream = conn.accept_uni().await?;
-            let id = stream.read_i32().await.expect("Randomly assigned i32 id");
+            let id = match stream.read_i32().await {
+                Ok(id) => id,
+                Err(err) => {
+                    log::error!("{err}");
+                    -1
+                }
+            };
 
+            log::info!("Openning bi-directional stream to pass godot rpc packets through.");
             // Open bi-directional stream, and mpsc channels to pass around packets.
             let stream = conn.accept_bi().await?;
             let (tx_send_packet, rx_send_packet) = broadcast::channel::<Vec<u8>>(64);
             let (tx_recv_packet, _) = broadcast::channel::<Vec<u8>>(64);
 
             let tx_packet = tx_recv_packet.clone();
+
+            log::info!("Spawning async task runtime to handle sending and receiving packets.");
             // Create our async task that handles the connection.
-            let task = n0_future::task::spawn(async move {
+            let task = AsyncRuntime::spawn(async move {
                 let (mut send, mut recv) = stream;
                 let (tx_recv_packet, mut rx_send_packet) = (tx_packet, rx_send_packet);
 
@@ -60,7 +75,9 @@ impl Multiplayer {
                     // Send packets we receive from main thread.
                     match rx_send_packet.recv().await {
                         Ok(to_send) => {
-                            if let Err(err) = send.write_all(to_send.as_slice()).await {
+                            let fbb = create_flatbuffer(to_send, id);
+
+                            if let Err(err) = send.write_all(fbb.finished_data()).await {
                                 log::error!("{err}")
                             }
                         }
@@ -140,7 +157,10 @@ impl ProtocolHandler for Multiplayer {
                         if id != remote_id {
                             continue;
                         }
-                        if let Err(err) = send.write_all(to_send.as_slice()).await {
+
+                        let fbb = create_flatbuffer(to_send, id);
+
+                        if let Err(err) = send.write_all(fbb.finished_data()).await {
                             log::error!("{err}")
                         }
                     }
@@ -168,6 +188,7 @@ impl ProtocolHandler for Multiplayer {
     }
 }
 
+#[derive(Debug)]
 pub struct MultiplayerConnection {
     id: i32,
     send_packet: broadcast::Sender<Vec<u8>>,
@@ -188,4 +209,21 @@ impl MultiplayerConnection {
     pub fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
         self.recv_packet.subscribe()
     }
+}
+
+fn create_flatbuffer<'a>(godot_packet: Vec<u8>, id: i32) -> flatbuffers::FlatBufferBuilder<'a> {
+    let mut fbb = flatbuffers::FlatBufferBuilder::with_capacity(MAX_ALLOWED_PACKET_SIZE);
+
+    let data = fbb.create_vector(godot_packet.as_slice());
+
+    let fbb_packet = MultiplayerDataPacket::create(
+        &mut fbb,
+        &MultiplayerDataPacketArgs {
+            id,
+            packet: Some(data),
+        },
+    );
+
+    fbb.finish(fbb_packet, None);
+    fbb
 }

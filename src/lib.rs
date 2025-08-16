@@ -1,8 +1,10 @@
 use std::{
     collections::{HashMap, VecDeque},
+    fmt::Display,
     mem::replace,
 };
 
+use crate::godot_peer_data_generated::root_as_multiplayer_data_packet;
 use godot::{
     classes::{
         IMultiplayerPeerExtension, MultiplayerPeerExtension,
@@ -44,7 +46,7 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
         self.packet_queue.len() as i32
     }
     fn get_max_packet_size(&self) -> i32 {
-        MAX_ALLOWED_PACKET_SIZE as i32
+        MAX_ALLOWED_PACKET_SIZE as i32 - 4
     }
     fn get_packet_channel(&self) -> i32 {
         0
@@ -90,10 +92,11 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
     }
     fn poll(&mut self) {
         // Update status
-        match replace(&mut self.status, RemoteConnection::Initialized) {
+        self.status = match replace(&mut self.status, RemoteConnection::Initialized) {
             RemoteConnection::Connecting(join_handle) => {
                 if join_handle.is_finished() {
-                    let result = match n0_future::future::block_on(join_handle) {
+                    godot_print!("Getting join handle result...");
+                    let result = match AsyncRuntime::block_on(join_handle) {
                         Ok(result) => result,
                         Err(err) => {
                             return godot_error!("{err}");
@@ -102,6 +105,9 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
 
                     match result {
                         Ok(conn) => {
+                            godot_print!(
+                                "Subscribing to packet receiver of new outgoing connection"
+                            );
                             let rx = conn.subscribe();
                             self.packet_recv = Some(rx);
                             RemoteConnection::Connected(conn)
@@ -112,28 +118,29 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
                     RemoteConnection::Connecting(join_handle)
                 }
             }
-            _ => RemoteConnection::Initialized,
+            status => status,
         };
 
         // Store connections
         self.inner.multiplayer.connections().for_each(|(id, conn)| {
             self.connections.insert(id, conn);
+            self.signals().peer_connected().emit(id as i64);
         });
 
         // Receive flatbuffer packets
         if let Some(rx) = &mut self.packet_recv {
             match rx.try_recv() {
                 Ok(packet) => {
-                    match godot_peer_data_generated::root_as_multiplayer_data_packet(&packet) {
+                    match root_as_multiplayer_data_packet(&packet) {
                         Ok(data_packet) => {
                             let id = data_packet.id();
                             if let Some(packet) = data_packet.packet() {
-                                let packet: Vec<u8> =
-                                    packet.iter().map(|byte| byte as u8).collect();
+                                // Map flatbuffer vector into normal vector.
+                                let packet: Vec<u8> = packet.into_iter().map(|byte| byte).collect();
                                 self.packet_queue.push_back((id, packet));
                             };
                         }
-                        Err(err) => return godot_error!("{err}"),
+                        Err(err) => godot_error!("{err}"),
                     }
                 }
                 Err(err) => godot_error!("{err}"),
@@ -146,6 +153,7 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
     fn disconnect_peer(&mut self, p_peer: i32, _p_force: bool) {
         if let Some(disconnect) = self.connections.remove(&p_peer) {
             disconnect.close(0u8.into(), b"Disconnect request");
+            self.signals().peer_disconnected().emit(p_peer as i64);
         }
     }
     fn get_unique_id(&self) -> i32 {
@@ -198,9 +206,12 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
 impl IrohMultiplayerPeer {
     #[signal]
     fn connecting_to_peer(peer: GString);
+    #[signal]
+    fn connected_to_peer();
 
     #[func]
     fn initialize() -> Gd<Self> {
+        tracing_subscriber::fmt().init();
         Gd::from_init_fn(|base| Self {
             base,
             inner: Inner::init(),
@@ -297,4 +308,14 @@ enum RemoteConnection {
         >,
     ),
     Connected(iroh_godot_protocol::MultiplayerConnection),
+}
+
+impl Display for RemoteConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RemoteConnection::Initialized => write!(f, "Network Initialized"),
+            RemoteConnection::Connecting(_) => write!(f, "Connecting"),
+            RemoteConnection::Connected(conn) => write!(f, "Connected to remote with {:?}", conn),
+        }
+    }
 }

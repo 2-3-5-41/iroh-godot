@@ -52,11 +52,11 @@ impl<'a> MultiplayerDataPacket<'a> {
     unsafe { self._tab.get::<i32>(MultiplayerDataPacket::VT_ID, Some(0)).unwrap()}
   }
   #[inline]
-  pub fn packet(&self) -> Option<flatbuffers::Vector<'a, i8>> {
+  pub fn packet(&self) -> Option<flatbuffers::Vector<'a, u8>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, i8>>>(MultiplayerDataPacket::VT_PACKET, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(MultiplayerDataPacket::VT_PACKET, None)}
   }
 }
 
@@ -68,14 +68,14 @@ impl flatbuffers::Verifiable for MultiplayerDataPacket<'_> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
      .visit_field::<i32>("id", Self::VT_ID, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, i8>>>("packet", Self::VT_PACKET, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("packet", Self::VT_PACKET, false)?
      .finish();
     Ok(())
   }
 }
 pub struct MultiplayerDataPacketArgs<'a> {
     pub id: i32,
-    pub packet: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, i8>>>,
+    pub packet: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
 }
 impl<'a> Default for MultiplayerDataPacketArgs<'a> {
   #[inline]
@@ -97,7 +97,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> MultiplayerDataPacketBuilder<'a
     self.fbb_.push_slot::<i32>(MultiplayerDataPacket::VT_ID, id, 0);
   }
   #[inline]
-  pub fn add_packet(&mut self, packet: flatbuffers::WIPOffset<flatbuffers::Vector<'b , i8>>) {
+  pub fn add_packet(&mut self, packet: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u8>>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(MultiplayerDataPacket::VT_PACKET, packet);
   }
   #[inline]
