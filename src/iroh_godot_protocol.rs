@@ -1,6 +1,7 @@
+use godot_tokio::AsyncRuntime;
 use iroh::{
     Endpoint, NodeId,
-    endpoint::ConnectError,
+    endpoint::{ConnectError, Connection},
     protocol::{AcceptError, ProtocolHandler},
 };
 use tokio::{
@@ -14,18 +15,21 @@ pub const ALPN: &[u8] = b"iroh/godot/0";
 #[derive(Debug, Clone)]
 pub struct Multiplayer {
     endpoint: Endpoint,
-    tx_send_packet: broadcast::Sender<Vec<u8>>,
-    tx_recv_packet: broadcast::Sender<Vec<u8>>,
+    send_packet: broadcast::Sender<(i32, Vec<u8>)>,
+    recv_packet: broadcast::Sender<Vec<u8>>,
+    connections: broadcast::Sender<(i32, Connection)>,
 }
 
 impl Multiplayer {
-    pub fn init(endpoint: Endpoint) -> Self {
-        let (tx_send_packet, _) = broadcast::channel::<Vec<u8>>(64);
+    pub async fn init(endpoint: Endpoint) -> Self {
+        let (tx_send_packet, _) = broadcast::channel::<(i32, Vec<u8>)>(64);
         let (tx_recv_packet, _) = broadcast::channel::<Vec<u8>>(64);
+        let (tx_connections, _) = broadcast::channel::<(i32, Connection)>(64);
         Self {
             endpoint,
-            tx_send_packet,
-            tx_recv_packet,
+            send_packet: tx_send_packet,
+            recv_packet: tx_recv_packet,
+            connections: tx_connections,
         }
     }
 
@@ -34,7 +38,7 @@ impl Multiplayer {
         node: NodeId,
     ) -> tokio::task::JoinHandle<Result<MultiplayerConnection, ConnectError>> {
         let endpoint = self.endpoint.clone();
-        n0_future::task::spawn(async move {
+        AsyncRuntime::spawn(async move {
             let conn = endpoint.connect(node, ALPN).await?;
 
             // Receive random i32 peer id from 'server' node.
@@ -77,49 +81,65 @@ impl Multiplayer {
 
             Ok(MultiplayerConnection {
                 id,
-                tx_send_packet,
-                tx_recv_packet,
-                task,
+                send_packet: tx_send_packet,
+                recv_packet: tx_recv_packet,
+                _task: task,
             })
         })
     }
-}
-impl ProtocolHandler for Multiplayer {
-    fn on_connecting(
-        &self,
-        connecting: iroh::endpoint::Connecting,
-    ) -> impl Future<Output = Result<iroh::endpoint::Connection, iroh::protocol::AcceptError>> + Send
-    {
-        async move {
-            let conn = connecting.await?;
 
-            {
-                // Send random i32 peer id, between 2..i32::MAX to newly connected node.
-                let mut stream = conn.open_uni().await?;
-                stream.write_i32(fastrand::i32(2..i32::MAX)).await?;
-                stream.finish()?
-            }
+    pub fn connections(&self) -> std::vec::IntoIter<(i32, Connection)> {
+        let mut connections: Vec<(i32, Connection)> = Vec::new();
+        let mut rx = self.connections.subscribe();
 
-            Ok(conn)
+        while let Ok(conn) = rx.try_recv() {
+            connections.push(conn);
         }
+
+        connections.into_iter()
     }
 
+    pub fn push_packet(&self, id: i32, packet: Vec<u8>) {
+        if let Err(err) = self.send_packet.send((id, packet)) {
+            log::error!("{err}")
+        }
+    }
+}
+impl ProtocolHandler for Multiplayer {
     #[allow(refining_impl_trait)]
     fn accept(
         &self,
         connection: iroh::endpoint::Connection,
     ) -> n0_future::boxed::BoxFuture<Result<(), AcceptError>> {
-        let mut rx_send_packet = self.tx_send_packet.subscribe();
-        let tx_recv_packet = self.tx_recv_packet.clone();
+        let mut rx_send_packet = self.send_packet.subscribe();
+        let tx_recv_packet = self.recv_packet.clone();
+        let tx_connections = self.connections.clone();
 
         Box::pin(async move {
-            // Open bi-directional stream, and mpsc channels to pass around packets.
+            let remote_id = {
+                // Send random i32 peer id, between 2..i32::MAX to newly connected node.
+                let new_id = fastrand::i32(2..i32::MAX);
+                let mut stream = connection.open_uni().await?;
+                stream.write_i32(new_id).await?;
+                stream.finish()?;
+
+                new_id
+            };
+
             let (mut send, mut recv) = connection.accept_bi().await?;
+
+            // Return connected node's randomized i32 id, and connection.
+            if let Err(err) = tx_connections.send((remote_id, connection)) {
+                log::error!("{err}")
+            };
 
             loop {
                 // Send packets we receive from main thread.
                 match rx_send_packet.recv().await {
-                    Ok(to_send) => {
+                    Ok((id, to_send)) => {
+                        if id != remote_id {
+                            continue;
+                        }
                         if let Err(err) = send.write_all(to_send.as_slice()).await {
                             log::error!("{err}")
                         }
@@ -150,9 +170,9 @@ impl ProtocolHandler for Multiplayer {
 
 pub struct MultiplayerConnection {
     id: i32,
-    tx_send_packet: broadcast::Sender<Vec<u8>>,
-    tx_recv_packet: broadcast::Sender<Vec<u8>>,
-    task: JoinHandle<()>,
+    send_packet: broadcast::Sender<Vec<u8>>,
+    recv_packet: broadcast::Sender<Vec<u8>>,
+    _task: JoinHandle<()>,
 }
 
 impl MultiplayerConnection {
@@ -163,9 +183,9 @@ impl MultiplayerConnection {
         &self,
         packet: Vec<u8>,
     ) -> Result<usize, broadcast::error::SendError<Vec<u8>>> {
-        self.tx_send_packet.send(packet)
+        self.send_packet.send(packet)
     }
     pub fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
-        self.tx_recv_packet.subscribe()
+        self.recv_packet.subscribe()
     }
 }

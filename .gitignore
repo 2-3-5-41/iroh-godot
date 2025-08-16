@@ -1,7 +1,7 @@
 /target
 Cargo.lock
 
-/addons/iroh_godot/*
-!/addons/iroh_godot/iroh_godot.gdextension
+/addons/iroh-godot/*
+!/addons/iroh-godot/iroh-godot.gdextension
 
 /examples/*/addons

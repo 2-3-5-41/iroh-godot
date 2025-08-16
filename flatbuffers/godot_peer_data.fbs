@@ -1,0 +1,6 @@
+table MultiplayerDataPacket {
+    id: int32;
+    packet: [byte];
+}
+
+root_type MultiplayerDataPacket;

@@ -11,9 +11,8 @@ Building from source is simple, if we assume you already know how to use git, an
 - Clone this repo
 - Open the newly cloned repo in your terminal
 - Run `./build.sh`
-  - The build script will build both debug, and release binaries
-  - The build script will then create symlinks of the built `debug` and `release` directories to the repo's `addons/iroh-godot` directory.
-- Create a symlink, or copy the `addons/iroh-godot` directory into your Godot project.
+- Copy `addons/` from the root of this project into your own godot project
+- Run your project, and start building
 
 ## Mentions
 
