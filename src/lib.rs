@@ -15,12 +15,15 @@ use godot::{
 };
 use godot_tokio::AsyncRuntime;
 use iroh::{Endpoint, NodeId, endpoint::Connection, node_info::NodeIdExt, protocol::Router};
-use tokio::{sync::broadcast, task::JoinHandle};
+use tokio::{
+    sync::broadcast::{self, error::TryRecvError},
+    task::JoinHandle,
+};
 
 mod godot_peer_data_generated;
 mod iroh_godot_protocol;
 
-const MAX_ALLOWED_PACKET_SIZE: usize = 1024;
+const MAX_ALLOWED_PACKET_SIZE: usize = 512;
 
 struct IrohGodot;
 
@@ -33,8 +36,10 @@ struct IrohMultiplayerPeer {
     base: Base<MultiplayerPeerExtension>,
     inner: Inner,
     transfer_channel: ProtocolChannel,
+    transfer_mode: TransferMode,
     status: RemoteConnection,
-    packet_recv: Option<broadcast::Receiver<Vec<u8>>>,
+    connection_recv: broadcast::Receiver<(i32, Connection)>,
+    packet_recv: broadcast::Receiver<Vec<u8>>,
     packet_queue: VecDeque<(i32, Vec<u8>)>,
     connections: HashMap<i32, Connection>,
     target_peer: i32,
@@ -46,39 +51,49 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
         self.packet_queue.len() as i32
     }
     fn get_max_packet_size(&self) -> i32 {
-        MAX_ALLOWED_PACKET_SIZE as i32 - 4
+        let size = MAX_ALLOWED_PACKET_SIZE as i32 - 4;
+        godot_print!("[{}] Max packet size {}", self.node_id(), size);
+        size
     }
     fn get_packet_channel(&self) -> i32 {
         0
     }
     fn get_packet_mode(&self) -> TransferMode {
-        TransferMode::RELIABLE
+        self.transfer_mode
     }
     fn set_transfer_channel(&mut self, p_channel: i32) {
         self.transfer_channel = ProtocolChannel::from(p_channel)
     }
     fn get_transfer_channel(&self) -> i32 {
+        godot_print!(
+            "[{}] Current transfer channel {:?}",
+            self.node_id(),
+            self.transfer_channel
+        );
         self.transfer_channel.to_godot() as i32
     }
     fn set_transfer_mode(&mut self, p_mode: TransferMode) {
-        match p_mode {
-            TransferMode::RELIABLE => return,
-            _ => {
-                return godot_warn!(
-                    "This function does nothing; QUIC only handles 'RELIABLE' streams."
-                );
-            }
+        if p_mode != TransferMode::RELIABLE {
+            godot_warn!("QUIC only handles 'RELIABLE' streams.");
         }
+        self.transfer_mode = p_mode;
     }
     fn get_transfer_mode(&self) -> TransferMode {
-        TransferMode::RELIABLE
+        godot_print!(
+            "[{}] Current transfer mode {:?}",
+            self.node_id(),
+            self.transfer_mode
+        );
+        self.transfer_mode
     }
     fn set_target_peer(&mut self, p_peer: i32) {
+        godot_print!("[{}] Setting target peer {}", self.node_id(), p_peer);
         self.target_peer = p_peer
     }
     fn get_packet_peer(&self) -> i32 {
-        if let Some(front) = self.packet_queue.front() {
-            return front.0;
+        if let Some((id, _)) = self.packet_queue.front() {
+            godot_print!("[{}] Getting packet peer {}", self.node_id(), id);
+            return *id;
         }
 
         -1
@@ -95,7 +110,6 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
         self.status = match replace(&mut self.status, RemoteConnection::Initialized) {
             RemoteConnection::Connecting(join_handle) => {
                 if join_handle.is_finished() {
-                    godot_print!("Getting join handle result...");
                     let result = match AsyncRuntime::block_on(join_handle) {
                         Ok(result) => result,
                         Err(err) => {
@@ -106,11 +120,13 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
                     match result {
                         Ok(conn) => {
                             godot_print!(
-                                "Subscribing to packet receiver of new outgoing connection"
+                                "[{}] Connected to remote peer, and received new ID: {}",
+                                self.node_id(),
+                                conn.get_id()
                             );
+                            self.signals().connected_to_peer().emit(conn.get_id());
                             let rx = conn.subscribe();
-                            self.packet_recv = Some(rx);
-                            RemoteConnection::Connected(conn)
+                            RemoteConnection::Connected(conn, rx)
                         }
                         Err(err) => return godot_error!("{err}"),
                     }
@@ -118,37 +134,102 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
                     RemoteConnection::Connecting(join_handle)
                 }
             }
+            RemoteConnection::Connected(conn, mut recv) => {
+                match recv.try_recv() {
+                    Ok(packet) => {
+                        godot_print!("[{}] Receiving flatbuffer packet", self.node_id());
+                        match root_as_multiplayer_data_packet(&packet) {
+                            Ok(data_packet) => {
+                                let id = data_packet.id();
+                                match data_packet.packet() {
+                                    Some(data) => {
+                                        // Map flatbuffer vector to normal vector.
+                                        let packet: Vec<u8> =
+                                            data.into_iter().map(|byte| byte).collect();
+                                        godot_print!(
+                                            "[{}] Received flatbuffer packet from {}\nWith data {:?}",
+                                            self.node_id(),
+                                            id,
+                                            packet.clone()
+                                        );
+                                        self.packet_queue.push_back((id, packet));
+                                        RemoteConnection::Connected(conn, recv)
+                                    }
+                                    None => {
+                                        godot_error!(
+                                            "[{}] Could not deserialize packet into flatbuffer structure",
+                                            self.node_id()
+                                        );
+                                        RemoteConnection::Connected(conn, recv)
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                godot_error!("{err}");
+                                RemoteConnection::Connected(conn, recv)
+                            }
+                        }
+                    }
+                    Err(TryRecvError::Closed) => {
+                        godot_error!(
+                            "[{}] Packet broadcast receiver has closed, this is a bug.",
+                            self.node_id()
+                        );
+                        RemoteConnection::Connected(conn, recv)
+                    }
+                    _ => RemoteConnection::Connected(conn, recv),
+                }
+            }
             status => status,
         };
 
         // Store connections
-        self.inner.multiplayer.connections().for_each(|(id, conn)| {
+        while let Ok((id, conn)) = self.connection_recv.try_recv() {
             self.connections.insert(id, conn);
             self.signals().peer_connected().emit(id as i64);
-        });
+            godot_print!("[{}] New connection with ID: {}", self.node_id(), id);
+        }
 
-        // Receive flatbuffer packets
-        if let Some(rx) = &mut self.packet_recv {
-            match rx.try_recv() {
-                Ok(packet) => {
-                    match root_as_multiplayer_data_packet(&packet) {
-                        Ok(data_packet) => {
-                            let id = data_packet.id();
-                            if let Some(packet) = data_packet.packet() {
+        // Receive remote flatbuffer packets
+        match &mut self.packet_recv.try_recv() {
+            Ok(recv) => {
+                godot_print!("[{}] Receiving flatbuffer packet", self.node_id());
+                match root_as_multiplayer_data_packet(&recv) {
+                    Ok(data_packet) => {
+                        let id = data_packet.id();
+                        match data_packet.packet() {
+                            Some(data) => {
                                 // Map flatbuffer vector into normal vector.
-                                let packet: Vec<u8> = packet.into_iter().map(|byte| byte).collect();
+                                let packet: Vec<u8> = data.into_iter().map(|byte| byte).collect();
+                                godot_print!(
+                                    "[{}] Received flatbuffer packet from {}\nWith data {:?}",
+                                    self.node_id(),
+                                    id,
+                                    packet.clone()
+                                );
                                 self.packet_queue.push_back((id, packet));
-                            };
-                        }
-                        Err(err) => godot_error!("{err}"),
+                            }
+                            None => godot_error!(
+                                "[{}] Could not deserialize packet into flatbuffer structure",
+                                self.node_id()
+                            ),
+                        };
                     }
+                    Err(err) => godot_error!("[{}] {err}", self.node_id()),
                 }
-                Err(err) => godot_error!("{err}"),
             }
+            Err(TryRecvError::Closed) => {
+                godot_error!(
+                    "[{}] Packet broadcast receiver has closed, this is a bug",
+                    self.node_id()
+                )
+            }
+            _ => (),
         }
     }
     fn close(&mut self) {
-        n0_future::future::block_on(self.inner.endpoint.close())
+        godot_print!("[{}] Closing iroh endpoint.", self.node_id());
+        AsyncRuntime::block_on(self.inner.endpoint.close())
     }
     fn disconnect_peer(&mut self, p_peer: i32, _p_force: bool) {
         if let Some(disconnect) = self.connections.remove(&p_peer) {
@@ -158,7 +239,9 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
     }
     fn get_unique_id(&self) -> i32 {
         match &self.status {
-            RemoteConnection::Connected(multiplayer_connection) => multiplayer_connection.get_id(),
+            RemoteConnection::Connected(multiplayer_connection, _) => {
+                multiplayer_connection.get_id()
+            }
             _ => 1, // Assume we are the 'server' node until we've connected to another node.
         }
     }
@@ -169,16 +252,19 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
         }
     }
     fn put_packet_script(&mut self, p_buffer: PackedByteArray) -> Error {
+        godot_print!("[{}] Target peer {}", self.node_id(), self.target_peer);
         match self.target_peer {
             0 => {
+                godot_print!("[{}] Broadcasting packet to all peers", self.node_id());
                 self.connections.iter().for_each(|(id, _)| {
                     self.inner.multiplayer.push_packet(*id, p_buffer.to_vec());
                 });
             }
-            1 => match &mut self.status {
+            1 => match &self.status {
                 RemoteConnection::Initialized => return Error::ERR_SKIP,
                 RemoteConnection::Connecting(_) => return Error::ERR_BUSY,
-                RemoteConnection::Connected(multiplayer_connection) => {
+                RemoteConnection::Connected(multiplayer_connection, _) => {
+                    godot_print!("[{}] Sending packet to 'server' peer", &self.node_id());
                     if let Err(err) = multiplayer_connection.push_packet(p_buffer.to_vec()) {
                         godot_error!("{err}");
                         return Error::ERR_CANT_ACQUIRE_RESOURCE;
@@ -187,6 +273,7 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
             },
             _ => {
                 let id = self.target_peer;
+                godot_print!("[{}] Sending packet to peer {}", &self.node_id(), id);
                 self.inner.multiplayer.push_packet(id, p_buffer.to_vec());
             }
         }
@@ -194,7 +281,8 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
         Error::OK
     }
     fn get_packet_script(&mut self) -> PackedByteArray {
-        if let Some((_, packet)) = self.packet_queue.pop_front() {
+        if let Some((id, packet)) = self.packet_queue.pop_front() {
+            godot_print!("[{}] Reading packet from peer {}", &self.node_id(), id);
             return packet.into();
         }
 
@@ -207,17 +295,24 @@ impl IrohMultiplayerPeer {
     #[signal]
     fn connecting_to_peer(peer: GString);
     #[signal]
-    fn connected_to_peer();
+    fn connected_to_peer(assigned: i32);
 
     #[func]
     fn initialize() -> Gd<Self> {
         tracing_subscriber::fmt().init();
+
+        let inner = Inner::init();
+        let connection_recv = inner.multiplayer.connections();
+        let packet_recv = inner.multiplayer.packets();
+
         Gd::from_init_fn(|base| Self {
             base,
-            inner: Inner::init(),
+            inner,
             transfer_channel: ProtocolChannel::Default,
+            transfer_mode: TransferMode::RELIABLE,
             status: RemoteConnection::Initialized,
-            packet_recv: Default::default(),
+            connection_recv,
+            packet_recv,
             packet_queue: Default::default(),
             connections: Default::default(),
             target_peer: 0,
@@ -267,7 +362,7 @@ impl Inner {
                 .await
                 .expect("iroh runtime");
 
-            let multiplayer = iroh_godot_protocol::Multiplayer::init(endpoint.clone()).await;
+            let multiplayer = iroh_godot_protocol::Multiplayer::init(endpoint.clone());
 
             let router = Router::builder(endpoint.clone())
                 .accept(iroh_godot_protocol::ALPN, multiplayer.clone())
@@ -286,7 +381,7 @@ impl Inner {
     }
 }
 
-#[derive(GodotConvert, Var, Export, Clone)]
+#[derive(Debug, GodotConvert, Var, Export, Clone)]
 #[godot(via = i64)]
 enum ProtocolChannel {
     Default = 0,
@@ -303,11 +398,12 @@ impl From<i32> for ProtocolChannel {
 enum RemoteConnection {
     Initialized,
     Connecting(
-        JoinHandle<
-            Result<iroh_godot_protocol::MultiplayerConnection, iroh::endpoint::ConnectError>,
-        >,
+        JoinHandle<Result<iroh_godot_protocol::OutboundConnection, iroh::endpoint::ConnectError>>,
     ),
-    Connected(iroh_godot_protocol::MultiplayerConnection),
+    Connected(
+        iroh_godot_protocol::OutboundConnection,
+        broadcast::Receiver<Vec<u8>>,
+    ),
 }
 
 impl Display for RemoteConnection {
@@ -315,7 +411,9 @@ impl Display for RemoteConnection {
         match self {
             RemoteConnection::Initialized => write!(f, "Network Initialized"),
             RemoteConnection::Connecting(_) => write!(f, "Connecting"),
-            RemoteConnection::Connected(conn) => write!(f, "Connected to remote with {:?}", conn),
+            RemoteConnection::Connected(conn, _) => {
+                write!(f, "Connected to remote with {:?}", conn)
+            }
         }
     }
 }

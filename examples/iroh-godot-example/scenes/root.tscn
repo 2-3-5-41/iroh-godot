@@ -2,8 +2,10 @@
 
 [ext_resource type="Script" uid="uid://kb0ak4xng3qq" path="res://scripts/root.gd" id="1_j5px3"]
 
-[node name="Root" type="Node3D" node_paths=PackedStringArray("connect_id_input", "local_node_id_reader")]
+[node name="Root" type="Node3D" node_paths=PackedStringArray("is_server_reader", "peer_id_reader", "connect_id_input", "local_node_id_reader")]
 script = ExtResource("1_j5px3")
+is_server_reader = NodePath("PanelContainer/VBoxContainer/IsServer")
+peer_id_reader = NodePath("PanelContainer/VBoxContainer/PeerID")
 connect_id_input = NodePath("PanelContainer/VBoxContainer/ConnectInput/TextEdit")
 local_node_id_reader = NodePath("PanelContainer/VBoxContainer/NodeIdReader/TextEdit")
 
@@ -17,6 +19,14 @@ grow_vertical = 2
 [node name="VBoxContainer" type="VBoxContainer" parent="PanelContainer"]
 layout_mode = 2
 alignment = 1
+
+[node name="IsServer" type="Label" parent="PanelContainer/VBoxContainer"]
+layout_mode = 2
+text = "Is server: bool"
+
+[node name="PeerID" type="Label" parent="PanelContainer/VBoxContainer"]
+layout_mode = 2
+text = "Godot RPC PeerID: "
 
 [node name="ConnectInput" type="HBoxContainer" parent="PanelContainer/VBoxContainer"]
 layout_mode = 2
@@ -45,4 +55,9 @@ placeholder_text = "iroh NodeId"
 editable = false
 scroll_fit_content_height = true
 
+[node name="Broadcast" type="Button" parent="PanelContainer/VBoxContainer"]
+layout_mode = 2
+text = "Broadcast ID"
+
 [connection signal="pressed" from="PanelContainer/VBoxContainer/ConnectInput/Connect" to="." method="_on_connect_pressed"]
+[connection signal="pressed" from="PanelContainer/VBoxContainer/Broadcast" to="." method="_on_broadcast_pressed"]

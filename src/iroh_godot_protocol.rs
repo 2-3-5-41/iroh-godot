@@ -5,11 +5,12 @@ use crate::{
 use godot_tokio::AsyncRuntime;
 use iroh::{
     Endpoint, NodeId,
-    endpoint::{ConnectError, Connection},
+    endpoint::{ConnectError, Connection, RecvStream, SendStream},
     protocol::{AcceptError, ProtocolHandler},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
+    select,
     sync::broadcast,
     task::JoinHandle,
 };
@@ -25,7 +26,7 @@ pub struct Multiplayer {
 }
 
 impl Multiplayer {
-    pub async fn init(endpoint: Endpoint) -> Self {
+    pub fn init(endpoint: Endpoint) -> Self {
         let (tx_send_packet, _) = broadcast::channel::<(i32, Vec<u8>)>(64);
         let (tx_recv_packet, _) = broadcast::channel::<Vec<u8>>(64);
         let (tx_connections, _) = broadcast::channel::<(i32, Connection)>(64);
@@ -40,63 +41,58 @@ impl Multiplayer {
     pub fn join(
         &self,
         node: NodeId,
-    ) -> tokio::task::JoinHandle<Result<MultiplayerConnection, ConnectError>> {
+    ) -> tokio::task::JoinHandle<Result<OutboundConnection, ConnectError>> {
         let endpoint = self.endpoint.clone();
+        let tx_connections = self.connections.clone();
         AsyncRuntime::spawn(async move {
             log::info!("Getting remote endpoint connection.");
-            let conn = endpoint.connect(node, ALPN).await?;
+            let connection = endpoint.connect(node, ALPN).await?;
 
-            log::info!("Receiving remote randomly generated i32 id");
-            // Receive random i32 peer id from 'server' node.
-            let mut stream = conn.accept_uni().await?;
-            let id = match stream.read_i32().await {
-                Ok(id) => id,
-                Err(err) => {
-                    log::error!("{err}");
-                    -1
-                }
+            log::info!("[Join] Opening bi-directional stream to pass godot rpc packets through.");
+            // Open bi-directional stream, and mpsc channels to pass around packets.
+            let mut stream = connection.open_bi().await?;
+
+            let (id_send, _) = &mut stream;
+
+            // Send random i32 peer id, between 2..i32::MAX to newly connected node.
+            log::info!("[Join] Sending randomly generated, self assigned, i32 id to remote peer.");
+            let id = fastrand::i32(2..i32::MAX);
+            if let Err(err) = id_send.write_i32(id).await {
+                log::error!("[Join] {err}")
             };
 
-            log::info!("Openning bi-directional stream to pass godot rpc packets through.");
-            // Open bi-directional stream, and mpsc channels to pass around packets.
-            let stream = conn.accept_bi().await?;
+            // Send connection with 'server' id back to main thread.
+            send_conn_to_main(tx_connections, 1, connection);
+
             let (tx_send_packet, rx_send_packet) = broadcast::channel::<Vec<u8>>(64);
             let (tx_recv_packet, _) = broadcast::channel::<Vec<u8>>(64);
 
             let tx_packet = tx_recv_packet.clone();
 
-            log::info!("Spawning async task runtime to handle sending and receiving packets.");
+            log::info!(
+                "[Join] Spawning async task runtime to handle sending and receiving packets."
+            );
             // Create our async task that handles the connection.
             let task = AsyncRuntime::spawn(async move {
                 let (mut send, mut recv) = stream;
                 let (tx_recv_packet, mut rx_send_packet) = (tx_packet, rx_send_packet);
 
                 loop {
-                    // Send packets we receive from main thread.
-                    match rx_send_packet.recv().await {
-                        Ok(to_send) => {
-                            let fbb = create_flatbuffer(to_send, id);
-
-                            if let Err(err) = send.write_all(fbb.finished_data()).await {
-                                log::error!("{err}")
+                    select! {
+                        // Send packets we receive from main thread.
+                        send_packet = rx_send_packet.recv() => match send_packet {
+                            Ok(to_send) => {
+                                send_to_stream(id, to_send, &mut send).await;
                             }
-                        }
-                        Err(err) => log::error!("{err}"),
-                    }
-
-                    // Receive packets from remote peers.
-                    match recv.read_to_end(crate::MAX_ALLOWED_PACKET_SIZE).await {
-                        Ok(packet) => {
-                            if let Err(err) = tx_recv_packet.send(packet) {
-                                log::error!("{err}");
-                            }
-                        }
-                        Err(err) => log::error!("{err}"),
+                            Err(err) => log::error!("[Join] {err}"),
+                        },
+                        // Receive packets from remote peer.
+                        _ = read_from_stream(&mut recv, tx_recv_packet.clone()) => {}
                     }
                 }
             });
 
-            Ok(MultiplayerConnection {
+            Ok(OutboundConnection {
                 id,
                 send_packet: tx_send_packet,
                 recv_packet: tx_recv_packet,
@@ -105,15 +101,12 @@ impl Multiplayer {
         })
     }
 
-    pub fn connections(&self) -> std::vec::IntoIter<(i32, Connection)> {
-        let mut connections: Vec<(i32, Connection)> = Vec::new();
-        let mut rx = self.connections.subscribe();
+    pub fn connections(&self) -> broadcast::Receiver<(i32, Connection)> {
+        self.connections.subscribe()
+    }
 
-        while let Ok(conn) = rx.try_recv() {
-            connections.push(conn);
-        }
-
-        connections.into_iter()
+    pub fn packets(&self) -> broadcast::Receiver<Vec<u8>> {
+        self.recv_packet.subscribe()
     }
 
     pub fn push_packet(&self, id: i32, packet: Vec<u8>) {
@@ -128,60 +121,36 @@ impl ProtocolHandler for Multiplayer {
         &self,
         connection: iroh::endpoint::Connection,
     ) -> n0_future::boxed::BoxFuture<Result<(), AcceptError>> {
+        log::info!("[Accept] Accepted new connection, and grabbing channels");
         let mut rx_send_packet = self.send_packet.subscribe();
         let tx_recv_packet = self.recv_packet.clone();
         let tx_connections = self.connections.clone();
 
         Box::pin(async move {
-            let remote_id = {
-                // Send random i32 peer id, between 2..i32::MAX to newly connected node.
-                let new_id = fastrand::i32(2..i32::MAX);
-                let mut stream = connection.open_uni().await?;
-                stream.write_i32(new_id).await?;
-                stream.finish()?;
-
-                new_id
-            };
-
+            log::info!("[Accept] Accepting bi-directional stream with remote peer");
             let (mut send, mut recv) = connection.accept_bi().await?;
 
+            let remote_id = recv.read_i32().await?;
+            log::info!("[Accept] Received remote random i32 peer id: {}", remote_id);
+
             // Return connected node's randomized i32 id, and connection.
-            if let Err(err) = tx_connections.send((remote_id, connection)) {
-                log::error!("{err}")
-            };
+            send_conn_to_main(tx_connections, remote_id, connection);
 
+            log::info!("[Accept] Starting runtime loop to handle incoming and outgoing packets");
             loop {
-                // Send packets we receive from main thread.
-                match rx_send_packet.recv().await {
-                    Ok((id, to_send)) => {
-                        if id != remote_id {
-                            continue;
+                select! {
+                    // Send packets we receive from main thread.
+                    send_packet = rx_send_packet.recv() => match send_packet {
+                        Ok((id, to_send)) => {
+                            if id != remote_id {
+                                continue;
+                            }
+                            send_to_stream(id, to_send, &mut send).await;
                         }
-
-                        let fbb = create_flatbuffer(to_send, id);
-
-                        if let Err(err) = send.write_all(fbb.finished_data()).await {
-                            log::error!("{err}")
-                        }
-                    }
-                    Err(err) => log::error!("{err}"),
-                }
-
-                // Receive packets from remote peers.
-                let incoming_buf: &mut [u8; crate::MAX_ALLOWED_PACKET_SIZE] =
-                    &mut [0u8; crate::MAX_ALLOWED_PACKET_SIZE];
-
-                match recv.read_exact(incoming_buf).await {
-                    Ok(()) => {
-                        if incoming_buf.len() > crate::MAX_ALLOWED_PACKET_SIZE {
-                            log::warn!("Ignoring oversized packet...");
-                            continue;
-                        }
-                        if let Err(err) = tx_recv_packet.send(Vec::new()) {
-                            log::error!("{err}");
-                        }
-                    }
-                    Err(err) => log::error!("{err}"),
+                        Err(err) => log::error!("[Accept] {err}"),
+                    },
+                    // Receive packets from remote peer.
+                    _ = read_from_stream(&mut recv, tx_recv_packet.clone()) => {}
                 }
             }
         })
@@ -189,14 +158,14 @@ impl ProtocolHandler for Multiplayer {
 }
 
 #[derive(Debug)]
-pub struct MultiplayerConnection {
+pub struct OutboundConnection {
     id: i32,
     send_packet: broadcast::Sender<Vec<u8>>,
     recv_packet: broadcast::Sender<Vec<u8>>,
     _task: JoinHandle<()>,
 }
 
-impl MultiplayerConnection {
+impl OutboundConnection {
     pub fn get_id(&self) -> i32 {
         self.id
     }
@@ -211,7 +180,7 @@ impl MultiplayerConnection {
     }
 }
 
-fn create_flatbuffer<'a>(godot_packet: Vec<u8>, id: i32) -> flatbuffers::FlatBufferBuilder<'a> {
+fn create_flatbuffer<'a>(id: i32, godot_packet: Vec<u8>) -> flatbuffers::FlatBufferBuilder<'a> {
     let mut fbb = flatbuffers::FlatBufferBuilder::with_capacity(MAX_ALLOWED_PACKET_SIZE);
 
     let data = fbb.create_vector(godot_packet.as_slice());
@@ -226,4 +195,62 @@ fn create_flatbuffer<'a>(godot_packet: Vec<u8>, id: i32) -> flatbuffers::FlatBuf
 
     fbb.finish(fbb_packet, None);
     fbb
+}
+
+fn send_conn_to_main(
+    tx_connections: broadcast::Sender<(i32, Connection)>,
+    id: i32,
+    connection: Connection,
+) {
+    match tx_connections.send((id, connection)) {
+        Ok(i) => log::info!("Sent connection back to main thread: {}", i),
+        Err(err) => log::error!("{err}"),
+    }
+}
+
+async fn read_from_stream(
+    stream: &mut RecvStream,
+    sender: broadcast::Sender<Vec<u8>>,
+) -> Option<usize> {
+    let buf: &mut [u8] = &mut [0u8; crate::MAX_ALLOWED_PACKET_SIZE];
+    match stream.read(buf).await {
+        Ok(size) => match size {
+            Some(n) => {
+                log::info!("Read {n}bytes from stream");
+                if n > crate::MAX_ALLOWED_PACKET_SIZE {
+                    log::warn!("Packet size exceeds maximum allowed size");
+                    return None;
+                }
+                match sender.send(buf.to_vec()) {
+                    Ok(n) => {
+                        log::info!("Packet received successfully");
+                        return Some(n);
+                    }
+                    Err(err) => {
+                        log::error!("{err}");
+                        return None;
+                    }
+                }
+            }
+            None => None,
+        },
+        Err(err) => {
+            log::error!("{err}");
+            None
+        }
+    }
+}
+
+async fn send_to_stream(id: i32, to_send: Vec<u8>, send: &mut SendStream) {
+    log::info!("Creating flatbuffer");
+    let fbb = create_flatbuffer(id, to_send);
+
+    let finished = fbb.finished_data();
+
+    log::info!("Sending packet of size {}bytes", finished.len());
+
+    match send.write_all(finished).await {
+        Ok(_) => log::info!("Packet sent successfully"),
+        Err(err) => log::error!("{err}"),
+    }
 }
