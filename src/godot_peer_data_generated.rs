@@ -25,7 +25,7 @@ impl<'a> flatbuffers::Follow<'a> for MultiplayerDataPacket<'a> {
 }
 
 impl<'a> MultiplayerDataPacket<'a> {
-  pub const VT_ID: flatbuffers::VOffsetT = 4;
+  pub const VT_SENDER: flatbuffers::VOffsetT = 4;
   pub const VT_PACKET: flatbuffers::VOffsetT = 6;
 
   #[inline]
@@ -39,24 +39,24 @@ impl<'a> MultiplayerDataPacket<'a> {
   ) -> flatbuffers::WIPOffset<MultiplayerDataPacket<'bldr>> {
     let mut builder = MultiplayerDataPacketBuilder::new(_fbb);
     if let Some(x) = args.packet { builder.add_packet(x); }
-    builder.add_id(args.id);
+    builder.add_sender(args.sender);
     builder.finish()
   }
 
 
   #[inline]
-  pub fn id(&self) -> i32 {
+  pub fn sender(&self) -> i32 {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<i32>(MultiplayerDataPacket::VT_ID, Some(0)).unwrap()}
+    unsafe { self._tab.get::<i32>(MultiplayerDataPacket::VT_SENDER, Some(0)).unwrap()}
   }
   #[inline]
-  pub fn packet(&self) -> Option<flatbuffers::Vector<'a, u8>> {
+  pub fn packet(&self) -> flatbuffers::Vector<'a, u8> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(MultiplayerDataPacket::VT_PACKET, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(MultiplayerDataPacket::VT_PACKET, None).unwrap()}
   }
 }
 
@@ -67,22 +67,22 @@ impl flatbuffers::Verifiable for MultiplayerDataPacket<'_> {
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
-     .visit_field::<i32>("id", Self::VT_ID, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("packet", Self::VT_PACKET, false)?
+     .visit_field::<i32>("sender", Self::VT_SENDER, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("packet", Self::VT_PACKET, true)?
      .finish();
     Ok(())
   }
 }
 pub struct MultiplayerDataPacketArgs<'a> {
-    pub id: i32,
+    pub sender: i32,
     pub packet: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
 }
 impl<'a> Default for MultiplayerDataPacketArgs<'a> {
   #[inline]
   fn default() -> Self {
     MultiplayerDataPacketArgs {
-      id: 0,
-      packet: None,
+      sender: 0,
+      packet: None, // required field
     }
   }
 }
@@ -93,8 +93,8 @@ pub struct MultiplayerDataPacketBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 
 }
 impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> MultiplayerDataPacketBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_id(&mut self, id: i32) {
-    self.fbb_.push_slot::<i32>(MultiplayerDataPacket::VT_ID, id, 0);
+  pub fn add_sender(&mut self, sender: i32) {
+    self.fbb_.push_slot::<i32>(MultiplayerDataPacket::VT_SENDER, sender, 0);
   }
   #[inline]
   pub fn add_packet(&mut self, packet: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u8>>) {
@@ -111,6 +111,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> MultiplayerDataPacketBuilder<'a
   #[inline]
   pub fn finish(self) -> flatbuffers::WIPOffset<MultiplayerDataPacket<'a>> {
     let o = self.fbb_.end_table(self.start_);
+    self.fbb_.required(o, MultiplayerDataPacket::VT_PACKET,"packet");
     flatbuffers::WIPOffset::new(o.value())
   }
 }
@@ -118,7 +119,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> MultiplayerDataPacketBuilder<'a
 impl core::fmt::Debug for MultiplayerDataPacket<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let mut ds = f.debug_struct("MultiplayerDataPacket");
-      ds.field("id", &self.id());
+      ds.field("sender", &self.sender());
       ds.field("packet", &self.packet());
       ds.finish()
   }

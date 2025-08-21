@@ -1,7 +1,4 @@
-use std::{
-    fs::{create_dir, read_dir, rename},
-    path::Path,
-};
+use std::path::Path;
 
 use flatc_rust;
 

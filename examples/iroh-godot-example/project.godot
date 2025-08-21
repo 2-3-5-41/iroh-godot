@@ -11,9 +11,13 @@ config_version=5
 [application]
 
 config/name="Iroh Godot Example"
-run/main_scene="uid://dmlv5an0f3wq1"
+run/main_scene="uid://bpdhsdfuf81oh"
 config/features=PackedStringArray("4.4", "Mobile")
 config/icon="res://icon.svg"
+
+[autoload]
+
+NetworkManager="*res://scripts/network_manager.gd"
 
 [rendering]
 

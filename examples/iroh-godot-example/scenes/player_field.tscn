@@ -1,0 +1,19 @@
+[gd_scene load_steps=4 format=3 uid="uid://bpdhsdfuf81oh"]
+
+[ext_resource type="PackedScene" uid="uid://dadxsbl5jsmbf" path="res://scenes/multiplayer_scene_ui.scn" id="1_30xng"]
+[ext_resource type="Script" uid="uid://d18e4d5liu0ug" path="res://scripts/iroh_multiplayer_spawner.gd" id="2_k2i8t"]
+[ext_resource type="PackedScene" uid="uid://dn4nh245ab0xk" path="res://scenes/player.tscn" id="3_luu8n"]
+
+[node name="PlayerField" type="Node2D"]
+
+[node name="MultiplayerSceneUI" parent="." instance=ExtResource("1_30xng")]
+offset_bottom = 128.0
+
+[node name="MultiplayerSpawner" type="MultiplayerSpawner" parent="."]
+_spawnable_scenes = PackedStringArray("uid://dn4nh245ab0xk")
+spawn_path = NodePath("../Network")
+script = ExtResource("2_k2i8t")
+iroh_player = ExtResource("3_luu8n")
+
+[node name="Network" type="Node2D" parent="."]
+position = Vector2(512, 256)

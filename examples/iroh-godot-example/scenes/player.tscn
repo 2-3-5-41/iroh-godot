@@ -1,0 +1,24 @@
+[gd_scene load_steps=5 format=3 uid="uid://dn4nh245ab0xk"]
+
+[ext_resource type="Texture2D" uid="uid://j6rmmqjyogdp" path="res://icon.svg" id="1_3vyb7"]
+[ext_resource type="Script" uid="uid://cqfx3jwpieu5j" path="res://scripts/iroh_player_controller.gd" id="1_g2els"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_g2els"]
+size = Vector2(128, 128)
+
+[sub_resource type="SceneReplicationConfig" id="SceneReplicationConfig_3vyb7"]
+properties/0/path = NodePath(".:position")
+properties/0/spawn = true
+properties/0/replication_mode = 2
+
+[node name="IrohPlayer" type="CharacterBody2D"]
+script = ExtResource("1_g2els")
+
+[node name="Icon" type="Sprite2D" parent="."]
+texture = ExtResource("1_3vyb7")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("RectangleShape2D_g2els")
+
+[node name="MultiplayerSynchronizer" type="MultiplayerSynchronizer" parent="."]
+replication_config = SubResource("SceneReplicationConfig_3vyb7")

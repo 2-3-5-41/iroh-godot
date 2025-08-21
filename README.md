@@ -35,4 +35,3 @@ Building from source is simple, if we assume you already know how to use git, an
 ## Plans
 
 - Since QUIC streams already handle multiplexing (channels in godot's TCP/UDP multiplexing imlementation), there's the plan to change how channels on RPCs are used; specifically, to dictate which iroh protocol (i.e [`iroh-gossip`](https://www.iroh.computer/proto/iroh-gossip)) to transmit a packet over.
-- Using [`iroh-gossip`](https://www.iroh.computer/proto/iroh-gossip) protocol under the hood to implement host migration.

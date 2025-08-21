@@ -1,6 +1,6 @@
 table MultiplayerDataPacket {
-    id: int32;
-    packet: [ubyte];
+    sender: int32;
+    packet: [ubyte] (required);
 }
 
 root_type MultiplayerDataPacket;

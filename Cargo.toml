@@ -7,6 +7,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
+anyhow = "1.0.99"
 data-encoding = "2.9.0"
 fastrand = "2.3.0"
 flatbuffers = "25.2.10"
