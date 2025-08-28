@@ -3,6 +3,7 @@ extends MultiplayerSpawner
 @export var iroh_player: PackedScene
 
 func _ready() -> void:
+	await NetworkManager.peer.bootstrapped
 	multiplayer.peer_connected.connect(spawn_player) # Spawn a player for the remote peers.
 	spawn_player(multiplayer.get_unique_id()) # Spawn our player for us.
 
