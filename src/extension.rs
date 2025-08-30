@@ -1,5 +1,7 @@
-use std::collections::VecDeque;
-
+use crate::{
+    api::{ApiCommands, ApiEvents, MultiplayerApi},
+    proto::MAX_PACKET_SIZE,
+};
 use godot::{
     classes::{
         IMultiplayerPeerExtension, MultiplayerPeerExtension,
@@ -9,12 +11,8 @@ use godot::{
     prelude::*,
 };
 use iroh::{NodeId, node_info::NodeIdExt};
+use std::collections::VecDeque;
 use tokio::sync::mpsc::error::TryRecvError;
-
-use crate::{
-    api::{ApiCommands, MultiplayerApi},
-    proto::MAX_PACKET_SIZE,
-};
 
 #[derive(GodotClass)]
 #[class(base=MultiplayerPeerExtension, tool)]
@@ -92,19 +90,19 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
         };
 
         match event {
-            crate::api::ApiEvents::Bind { unique_id, node_id } => {
+            ApiEvents::Bind { unique_id, node_id } => {
                 self.unique_id = unique_id;
                 self.node_id.replace(node_id);
                 self.status = ConnectionStatus::CONNECTED;
                 self.signals().bootstrapped().emit();
             }
-            crate::api::ApiEvents::NewConnection(unique) => {
+            ApiEvents::NewConnection(unique) => {
                 self.base_mut()
                     .signals()
                     .peer_connected()
                     .emit(unique as i64);
             }
-            crate::api::ApiEvents::RecvPacket((unique, packet)) => {
+            ApiEvents::RecvPacket((unique, packet)) => {
                 self.recv_packets.push_back((unique, packet.into()));
             }
         }
@@ -123,16 +121,22 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
     }
     // Provided methods
     fn get_packet_script(&mut self) -> PackedByteArray {
-        if let Some((_, packet)) = self.recv_packets.pop_front() {
-            return packet;
-        }
-        PackedByteArray::default()
+        let (_, packet) = self
+            .recv_packets
+            .pop_front()
+            .expect("There should be a packet available");
+        packet
     }
     fn put_packet_script(&mut self, p_buffer: PackedByteArray) -> Error {
-        self.api.push_command(ApiCommands::PushPacket {
-            id: self.target_peer,
-            packet: p_buffer.to_vec(),
-        });
+        match self.target_peer {
+            0 => self
+                .api
+                .push_command(ApiCommands::BroadcastPacket(p_buffer.to_vec())),
+            _ => self.api.push_command(ApiCommands::PushPacket {
+                id: self.target_peer,
+                packet: p_buffer.to_vec(),
+            }),
+        }
         Error::OK
     }
 }

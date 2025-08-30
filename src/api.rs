@@ -15,6 +15,7 @@ pub enum ApiEvents {
 pub enum ApiCommands {
     JoinNode(NodeAddr),
     PushPacket { id: i32, packet: Vec<u8> },
+    BroadcastPacket(Vec<u8>),
     DisconnectNode(i32),
     Close,
 }
@@ -28,7 +29,7 @@ impl MultiplayerApi {
     pub fn spawn() -> Self {
         let (tx_events, rx_events) = mpsc::channel::<ApiEvents>(64);
         let (tx_commands, rx_commands) = mpsc::channel::<ApiCommands>(64);
-        AsyncRuntime::spawn(init(tx_events, rx_commands));
+        AsyncRuntime::spawn(start(tx_events, rx_commands));
         Self {
             rx_events,
             tx_commands,
@@ -47,17 +48,13 @@ impl MultiplayerApi {
     }
 }
 
-async fn init(tx_events: mpsc::Sender<ApiEvents>, mut rx_commands: mpsc::Receiver<ApiCommands>) {
+async fn start(tx_events: mpsc::Sender<ApiEvents>, mut rx_commands: mpsc::Receiver<ApiCommands>) {
     let endpoint = match Endpoint::builder().discovery_n0().bind().await {
         Ok(bind) => bind,
         Err(err) => return log::error!("{err}"),
     };
 
-    let local_node_id = endpoint.node_id();
-
-    let unique = fastrand::i32(2..i32::MAX);
-
-    let multiplayer_proto = MultiplayerProto::new(endpoint.clone(), tx_events.clone(), unique);
+    let multiplayer_proto = MultiplayerProto::new(endpoint.clone(), tx_events.clone());
 
     let router = Router::builder(endpoint.clone())
         .accept(ALPN, multiplayer_proto.clone())
@@ -65,8 +62,8 @@ async fn init(tx_events: mpsc::Sender<ApiEvents>, mut rx_commands: mpsc::Receive
 
     if let Err(err) = tx_events
         .send(ApiEvents::Bind {
-            unique_id: unique,
-            node_id: local_node_id,
+            unique_id: multiplayer_proto.unique_id(),
+            node_id: endpoint.node_id(),
         })
         .await
     {
@@ -82,6 +79,7 @@ async fn init(tx_events: mpsc::Sender<ApiEvents>, mut rx_commands: mpsc::Receive
         match command {
             ApiCommands::JoinNode(node_addr) => multiplayer_proto.join_peer(node_addr),
             ApiCommands::PushPacket { id, packet } => multiplayer_proto.push_packet(id, packet),
+            ApiCommands::BroadcastPacket(packet) => multiplayer_proto.broadcast_packet(packet),
             ApiCommands::DisconnectNode(id) => multiplayer_proto.disconnect_node(id),
             ApiCommands::Close => {
                 if let Err(err) = router.shutdown().await {

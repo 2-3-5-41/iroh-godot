@@ -1,0 +1,10 @@
+table Accepting {
+    id: int;
+    nodes: [NodeIdent];
+}
+
+struct NodeIdent {
+    bytes: [ubyte:32];
+}
+
+root_type Accepting;
