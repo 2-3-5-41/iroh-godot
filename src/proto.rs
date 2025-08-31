@@ -13,6 +13,7 @@ use iroh::{
 };
 use std::{collections::HashMap, sync::Arc};
 use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
     sync::{Mutex, mpsc},
     task::JoinHandle,
 };
@@ -342,27 +343,35 @@ impl MultiplayerConnection {
             let mut commands = rx_commands;
             let (mut send, mut recv) = stream;
 
-            let buf: &mut [u8; MAX_PACKET_SIZE] = &mut [0u8; MAX_PACKET_SIZE];
-
             loop {
                 tokio::select! {
                     command = commands.recv() => match command {
                         Some(command) => match command {
-                            ProtoCommand::PushPacket(packet) => if let Err(err) = send.write_all(&packet).await {
-                                break log::error!("{err}")
-                            },
+                            ProtoCommand::PushPacket(packet) => {
+                                let packet_len = packet.len();
+                                if let Err(err) = send.write_u16(packet_len as u16).await {
+                                    log::error!("{err}")
+                                };
+                                if let Err(err) = send.write_all(packet.as_slice()).await {
+                                    log::error!("{err}")
+                                }
+                            }
                         },
                         None => break log::warn!("Protocol Commands Channel Closed"),
                     },
-                    read = recv.read(buf) => {
-                        if let Err(err) = read {
-                            break log::error!("{err}");
-                        }
+                    read_size = recv.read_u16() => match read_size {
+                        Ok(size) => {
+                            let mut buf = vec![0u8; size as usize];
 
-                        log::info!("Recv packet from {} with {} bytes", unique, buf.len());
-                        if let Err(err) = events.send(ApiEvents::RecvPacket((unique, buf.to_vec()))).await {
-                            break log::error!("{err}")
-                        };
+                            if let Err(err) = recv.read(&mut buf).await {
+                                log::error!("{err}")
+                            };
+
+                            if let Err(err) = events.send(ApiEvents::RecvPacket((unique, buf))).await {
+                                log::error!("{err}")
+                            };
+                        },
+                        Err(err) => log::error!("{err}"),
                     }
                 }
             }
