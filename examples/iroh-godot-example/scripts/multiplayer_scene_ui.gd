@@ -4,6 +4,7 @@ extends Control
 @onready var local_id: TextEdit = $VBoxContainer/TextEdit
 
 func _ready() -> void:
+	await NetworkManager.peer.bootstrapped
 	local_id.text = NetworkManager.node_id()
 	$VBoxContainer/Label.text = "Local Multiplayer Peer ID: " + str(multiplayer.get_unique_id())
 

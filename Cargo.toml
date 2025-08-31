@@ -11,7 +11,7 @@ anyhow = "1.0.99"
 data-encoding = "2.9.0"
 fastrand = "2.3.0"
 flatbuffers = "25.2.10"
-godot = { version = "0.3.4", features = [
+godot = { version = "0.3.5", features = [
     "register-docs",
     "experimental-threads",
 ] }

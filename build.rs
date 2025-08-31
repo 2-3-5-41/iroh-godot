@@ -1,14 +1,15 @@
-use std::path::Path;
-
 use flatc_rust;
+use std::path::Path;
 
 fn main() {
     println!("cargo::rerun-if-changed=flatbuffers/");
 
     flatc_rust::run(flatc_rust::Args {
-        lang: "rust",
-        inputs: &[Path::new("flatbuffers/godot_peer_data.fbs")],
-        out_dir: Path::new("src/"),
+        inputs: &[
+            Path::new("flatbuffers/connecting.fbs"),
+            Path::new("flatbuffers/accepting.fbs"),
+        ],
+        out_dir: Path::new("src/flatbuffers"),
         ..Default::default()
     })
     .expect("flatc");

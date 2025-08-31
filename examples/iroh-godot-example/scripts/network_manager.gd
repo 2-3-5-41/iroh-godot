@@ -5,11 +5,11 @@ const PORT: int = 23541
 var peer: IrohMultiplayerPeer
 
 func _ready() -> void:
-	peer = IrohMultiplayerPeer.bootstrap(PORT)
+	peer = IrohMultiplayerPeer.new()
 	multiplayer.multiplayer_peer = peer
 
 func connect_to_node(node: String) :
-	peer.connect_to_node(node)
+	peer.join(node)
 
 func node_id() -> String:
-	return peer.local_node_id()
+	return peer.node_id()

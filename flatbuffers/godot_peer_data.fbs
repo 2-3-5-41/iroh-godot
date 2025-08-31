@@ -1,6 +1,0 @@
-table MultiplayerDataPacket {
-    sender: int32;
-    packet: [ubyte] (required);
-}
-
-root_type MultiplayerDataPacket;

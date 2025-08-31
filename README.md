@@ -2,9 +2,9 @@
 
 **EXPERIMENTAL**: This project is under experimental development, use at your own risk.
 
-`iroh-godot` is a GDExtension that adds a new `MultiplayerPeer` implementation for the [iroh](https://iroh.computer) networking library to take advantage of Godot's high-level multiplayer api, allowing for seamless* integration of peer-2-peer connectivity in your multiplayer project.
+`iroh-godot` is a GDExtension that adds a new `MultiplayerPeer` implementation for the [iroh](https://iroh.computer) networking library to take advantage of Godot's high-level multiplayer api, allowing for *seamless** integration of peer-2-peer connectivity in your multiplayer project.
 
-> *Seamless in a sense that you can just swap out your current `ENETMultiplayerPeer`, or other implementation, with this one and continue using Godot's build in multiplayer APIs/Nodes with minimal changes to your actual code. You _may_ have to change how you thinkg about your use of RPC channels, since you're no longer in the world of TCP/UDP sockets.
+> *Seamless in a sense that you can just swap out your current `ENETMultiplayerPeer`, or other implementation, with this one and continue using Godot's built-in multiplayer APIs/Nodes with minimal changes to your actual code.
 
 ## Build
 
@@ -30,8 +30,8 @@ Building from source is simple, if we assume you already know how to use git, an
 ## Limitations*
 
 - Currently only supports reliable QUIC bi-directional streams between peers.
-  - *Even though QUIC streams are considerably fast at transmitting data, some would (and, kind of should) argue a raw UDP socket _is_ faster for just sending packets out without regard to when it was sent.
+  - *While QUIC streams are fast; datagrams are faster in a lot of cases.
 
 ## Plans
 
-- Since QUIC streams already handle multiplexing (channels in godot's TCP/UDP multiplexing imlementation), there's the plan to change how channels on RPCs are used; specifically, to dictate which iroh protocol (i.e [`iroh-gossip`](https://www.iroh.computer/proto/iroh-gossip)) to transmit a packet over.
+- Implement other [`iroh` protocols](https://www.iroh.computer/proto) that can be useful to developers in more complex projects.
