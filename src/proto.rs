@@ -156,13 +156,12 @@ impl MultiplayerProto {
                                         // Store new connection object
                                         conn_map.insert(remote_id, multiplayer_connection);
 
-                                        // Notify main thread of new connection
                                         if let Err(err) = tx_events
                                             .send(ApiEvents::NewConnection(remote_id))
                                             .await
                                         {
                                             log::error!("{err}")
-                                        };
+                                        }
                                     }
                                     Err(err) => log::error!("{err}"),
                                 }
@@ -179,12 +178,11 @@ impl MultiplayerProto {
                             // Store new connection object
                             conn_map.insert(remote_id, multiplayer_connection);
 
-                            // Notify main thread of new connection
                             if let Err(err) =
                                 tx_events.send(ApiEvents::NewConnection(remote_id)).await
                             {
                                 log::error!("{err}")
-                            };
+                            }
                         }
                         None => log::info!("No one else to connect to"),
                     }
@@ -323,8 +321,10 @@ impl ProtocolHandler for MultiplayerProto {
 
 #[derive(Debug)]
 struct MultiplayerConnection {
+    unique: i32,
     connection: Connection,
     tx_commands: mpsc::Sender<ProtoCommand>,
+    tx_events: mpsc::Sender<ApiEvents>,
 }
 
 impl MultiplayerConnection {
@@ -337,9 +337,10 @@ impl MultiplayerConnection {
         let (tx_commands, rx_commands) = mpsc::channel::<ProtoCommand>(32);
 
         // Spawn connection runtime.
+        let events = tx_events.clone();
         AsyncRuntime::spawn(async move {
             let unique = unique;
-            let events = tx_events;
+            let events = events;
             let mut commands = rx_commands;
             let (mut send, mut recv) = stream;
 
@@ -350,10 +351,10 @@ impl MultiplayerConnection {
                             ProtoCommand::PushPacket(packet) => {
                                 let packet_len = packet.len();
                                 if let Err(err) = send.write_u16(packet_len as u16).await {
-                                    log::error!("{err}")
+                                    break log::error!("[Connection Push Packet Error] {err}")
                                 };
                                 if let Err(err) = send.write_all(packet.as_slice()).await {
-                                    log::error!("{err}")
+                                    break log::error!("[Connection Push Packet Error] {err}")
                                 }
                             }
                         },
@@ -364,21 +365,27 @@ impl MultiplayerConnection {
                             let mut buf = vec![0u8; size as usize];
 
                             if let Err(err) = recv.read(&mut buf).await {
-                                log::error!("{err}")
+                                break log::error!("[Connection Receive Packet Error] {err}")
                             };
 
                             if let Err(err) = events.send(ApiEvents::RecvPacket((unique, buf))).await {
-                                log::error!("{err}")
+                                break log::error!("[Connection Receive Packet Error] {err}")
                             };
                         },
-                        Err(err) => log::error!("{err}"),
-                    }
+                        Err(err) => break log::error!("[Connection Receive Packet Error] {err}"),
+                    },
                 }
+            }
+
+            if let Err(err) = events.send(ApiEvents::LostConnection(unique)).await {
+                log::error!("{err}")
             }
         });
         Self {
+            unique,
             connection,
             tx_commands,
+            tx_events,
         }
     }
     fn node_id(&self) -> NodeId {
@@ -394,5 +401,13 @@ impl MultiplayerConnection {
     fn close(&self) {
         self.connection
             .close(0u8.into(), b"Connection closed via request from remote");
+
+        let events = self.tx_events.clone();
+        let unique = self.unique;
+        AsyncRuntime::spawn(async move {
+            if let Err(err) = events.send(ApiEvents::LostConnection(unique)).await {
+                log::error!("{err}")
+            };
+        });
     }
 }

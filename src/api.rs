@@ -1,3 +1,5 @@
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+
 use godot_tokio::AsyncRuntime;
 use iroh::{Endpoint, NodeAddr, NodeId, protocol::Router};
 use tokio::sync::mpsc;
@@ -8,6 +10,7 @@ use crate::proto::{ALPN, MultiplayerProto};
 pub enum ApiEvents {
     Bind { unique_id: i32, node_id: NodeId },
     NewConnection(i32),
+    LostConnection(i32),
     RecvPacket((i32, Vec<u8>)),
 }
 
@@ -26,10 +29,10 @@ pub struct MultiplayerApi {
 }
 
 impl MultiplayerApi {
-    pub fn spawn() -> Self {
+    pub fn spawn(port: u16) -> Self {
         let (tx_events, rx_events) = mpsc::channel::<ApiEvents>(64);
         let (tx_commands, rx_commands) = mpsc::channel::<ApiCommands>(64);
-        AsyncRuntime::spawn(start(tx_events, rx_commands));
+        AsyncRuntime::spawn(start(tx_events, rx_commands, port));
         Self {
             rx_events,
             tx_commands,
@@ -48,8 +51,18 @@ impl MultiplayerApi {
     }
 }
 
-async fn start(tx_events: mpsc::Sender<ApiEvents>, mut rx_commands: mpsc::Receiver<ApiCommands>) {
-    let endpoint = match Endpoint::builder().discovery_n0().bind().await {
+async fn start(
+    tx_events: mpsc::Sender<ApiEvents>,
+    mut rx_commands: mpsc::Receiver<ApiCommands>,
+    port: u16,
+) {
+    let endpoint = match Endpoint::builder()
+        .discovery_n0()
+        .bind_addr_v4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+        .bind_addr_v6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, port, 0, 0))
+        .bind()
+        .await
+    {
         Ok(bind) => bind,
         Err(err) => return log::error!("{err}"),
     };

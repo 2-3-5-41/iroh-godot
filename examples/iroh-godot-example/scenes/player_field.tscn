@@ -7,7 +7,10 @@
 [node name="PlayerField" type="Node2D"]
 
 [node name="MultiplayerSceneUI" parent="." instance=ExtResource("1_30xng")]
-offset_bottom = 128.0
+offset_left = 24.0
+offset_top = 24.0
+offset_right = 536.0
+offset_bottom = 280.0
 
 [node name="MultiplayerSpawner" type="MultiplayerSpawner" parent="."]
 _spawnable_scenes = PackedStringArray("uid://dn4nh245ab0xk")
@@ -16,4 +19,4 @@ script = ExtResource("2_k2i8t")
 iroh_player = ExtResource("3_luu8n")
 
 [node name="Network" type="Node2D" parent="."]
-position = Vector2(512, 256)
+position = Vector2(640, 360)

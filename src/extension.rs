@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use tokio::sync::mpsc::error::TryRecvError;
 
 #[derive(GodotClass)]
-#[class(base=MultiplayerPeerExtension, tool)]
+#[class(base=MultiplayerPeerExtension, tool, no_init)]
 struct IrohMultiplayerPeer {
     base: Base<MultiplayerPeerExtension>,
     api: MultiplayerApi,
@@ -28,18 +28,6 @@ struct IrohMultiplayerPeer {
 
 #[godot_api]
 impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
-    fn init(base: Base<MultiplayerPeerExtension>) -> Self {
-        let api = MultiplayerApi::spawn();
-        Self {
-            base,
-            api,
-            unique_id: 0,
-            node_id: None,
-            target_peer: 0,
-            status: ConnectionStatus::CONNECTING,
-            recv_packets: Default::default(),
-        }
-    }
     // Required methods
     fn get_available_packet_count(&self) -> i32 {
         self.recv_packets.len() as i32
@@ -74,8 +62,10 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
             None => -1,
         }
     }
+    /// This will always return `false` as an `iroh` peer cannot be a standalone server.
+    /// If a peer needs to act as the game authority, you must set them as the multiplayer authority in your game logic.
     fn is_server(&self) -> bool {
-        // It would be an error for an IrohMultiplayerPeer to be a `server`
+        // It would be an error for an IrohMultiplayerPeer to be a 'server'
         false
     }
     fn poll(&mut self) {
@@ -97,10 +87,10 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
                 self.signals().bootstrapped().emit();
             }
             ApiEvents::NewConnection(unique) => {
-                self.base_mut()
-                    .signals()
-                    .peer_connected()
-                    .emit(unique as i64);
+                self.signals().peer_connected().emit(unique as i64);
+            }
+            ApiEvents::LostConnection(unique) => {
+                self.signals().peer_disconnected().emit(unique as i64);
             }
             ApiEvents::RecvPacket((unique, packet)) => {
                 self.recv_packets.push_back((unique, packet.into()));
@@ -143,9 +133,26 @@ impl IMultiplayerPeerExtension for IrohMultiplayerPeer {
 
 #[godot_api]
 impl IrohMultiplayerPeer {
+    /// Signal emitted once the `iroh` async runtime has been successfully established.
     #[signal]
     fn bootstrapped();
 
+    /// Start the `iroh` async runtime, and bind our endpoint (on IPV4 & IPV6) to the provided port number.
+    #[func]
+    fn bootstrap(port: u16) -> Gd<Self> {
+        let api = MultiplayerApi::spawn(port);
+        Gd::from_init_fn(|base| Self {
+            base,
+            api,
+            unique_id: 0,
+            node_id: None,
+            target_peer: 0,
+            status: ConnectionStatus::CONNECTING,
+            recv_packets: Default::default(),
+        })
+    }
+
+    /// Request the `iroh` async runtime connect to a node via a z-base-32 NodeId (NodeAddr).
     #[func]
     fn join(&self, node_addr: String) {
         let node = match NodeId::from_z32(&node_addr) {
@@ -155,8 +162,9 @@ impl IrohMultiplayerPeer {
         self.api.push_command(ApiCommands::JoinNode(node.into()));
     }
 
+    /// Read our local z-base-32 NodeId string.
     #[func]
-    fn node_id(&self) -> String {
+    fn local_node_id(&self) -> String {
         match self.node_id {
             Some(id) => id.to_z32(),
             None => "NULL".into(),

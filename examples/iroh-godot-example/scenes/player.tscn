@@ -12,6 +12,7 @@ properties/0/spawn = true
 properties/0/replication_mode = 2
 
 [node name="IrohPlayer" type="CharacterBody2D"]
+motion_mode = 1
 script = ExtResource("1_g2els")
 
 [node name="Icon" type="Sprite2D" parent="."]
