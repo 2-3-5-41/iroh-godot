@@ -6,17 +6,27 @@ edition = "2024"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+default = ["full"]
+full = ["blobs", "gossip"]
+gossip = ["dep:iroh-gossip"]
+blobs = ["dep:iroh-blobs"]
+
 [dependencies]
 data-encoding = "2.9.0"
-fastrand = "2.3.0"
-flatbuffers = "25.2.10"
-godot = { version = "0.3.5", features = [
+flexbuffers = "25.9.23"
+futures-lite = "2.6.1"
+godot = { version = "0.4.0", features = [
     "register-docs",
     "experimental-threads",
 ] }
 godot_tokio = "0.3.1"
-iroh = "0.91.1"
+iroh = "0.92.0"
+iroh-blobs = { version = "0.94.0", optional = true }
+iroh-gossip = { version = "0.92.0", optional = true }
 log = "0.4.27"
+rand = "0.9.2"
+serde = "1.0.228"
 tokio = { version = "1.47.1", default-features = false, features = [
     "sync",
     "macros",

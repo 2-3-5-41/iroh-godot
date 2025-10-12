@@ -1,6 +1,0 @@
-table Connecting {
-    id: int;
-    request_nodes: bool;
-}
-
-root_type Connecting;

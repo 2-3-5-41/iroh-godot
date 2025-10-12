@@ -22,7 +22,7 @@ Building from source is simple, if we assume you already know how to use git, an
   - For proving the implementation of `iroh` into godot as a `MultiplayerPeerExtension`.
 - [godot-rust/gdext](https://github.com/godot-rust/gdext)
   - Intuitive Rust GDExtension bindings.
-- [flatbuffers](https://flatbuffers.dev)
+- [flatbuffers/flexbuffers](https://flatbuffers.dev/flexbuffers/)
   - For making data serialization/deserialization fast and simple.
 - [iroh](https://iroh.computer)
   - For making peer-2-peer simple.
