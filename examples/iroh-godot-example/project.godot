@@ -15,13 +15,9 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 [application]
 
 config/name="Iroh Godot Example"
-run/main_scene="uid://bpdhsdfuf81oh"
+run/main_scene="uid://cveylly7nbd1g"
 config/features=PackedStringArray("4.6", "Mobile")
 config/icon="res://icon.svg"
-
-[autoload]
-
-NetworkManager="*res://scripts/network_manager.gd"
 
 [display]
 

@@ -1,0 +1,39 @@
+[gd_scene format=3 uid="uid://cveylly7nbd1g"]
+
+[ext_resource type="Script" uid="uid://b8n8d2th5v4gi" path="res://scripts/root.gd" id="1_j5px3"]
+[ext_resource type="Script" uid="uid://bst5g11bfxlqv" path="res://scenes/example_control_panel.gd" id="2_twpsu"]
+
+[node name="Root" type="Node2D" unique_id=1171592127]
+script = ExtResource("1_j5px3")
+
+[node name="PanelContainer" type="PanelContainer" parent="." unique_id=620552358 node_paths=PackedStringArray("public_id_text")]
+anchors_preset = 9
+anchor_bottom = 1.0
+offset_left = 24.0
+offset_top = 20.0
+offset_right = 536.0
+offset_bottom = 276.0
+grow_vertical = 2
+size_flags_horizontal = 0
+script = ExtResource("2_twpsu")
+public_id_text = NodePath("VBoxContainer/TextEdit")
+
+[node name="VBoxContainer" type="VBoxContainer" parent="PanelContainer" unique_id=1881107128]
+layout_mode = 2
+
+[node name="TextEdit" type="TextEdit" parent="PanelContainer/VBoxContainer" unique_id=1670377288]
+layout_mode = 2
+size_flags_vertical = 3
+size_flags_stretch_ratio = 0.2
+placeholder_text = "iroh public id"
+editable = false
+
+[node name="VBoxContainer" type="VBoxContainer" parent="PanelContainer/VBoxContainer" unique_id=682656948]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="Button" type="Button" parent="PanelContainer/VBoxContainer/VBoxContainer" unique_id=1199775764]
+layout_mode = 2
+text = "CREATE INSTANCE"
+
+[connection signal="pressed" from="PanelContainer/VBoxContainer/VBoxContainer/Button" to="." method="_create_instance_pressed"]
